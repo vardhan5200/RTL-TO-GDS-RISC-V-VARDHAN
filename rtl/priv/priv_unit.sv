@@ -9,6 +9,12 @@
 //         plus SYSTEM-opcode decode / CSR legality
 //       breakpoint EBREAK   (cause 3, mtval = pc)
 //       ecall from M-mode   (cause 11, mtval = 0)
+//       external synchronous exception (xcpt_valid/xcpt_cause/xcpt_tval),
+//         e.g. an MMU page fault (12/13/15) or access fault (1/5/7) that the
+//         pipeline detects after the instruction was presented (multi-cycle
+//         translation). It may be raised on a later cycle with instr_valid=0;
+//         pc must still be the faulting instruction's pc (-> mepc). It has
+//         the highest priority (the faulting instruction is the oldest one).
 //   * takes interrupts at an instruction boundary (before instr executes),
 //     when mstatus.MIE && (mie & mip) != 0. Priority MEI(11) > MSI(3) > MTI(7).
 //     mepc = pc of the not-yet-executed instruction, mcause = {1, code}.
@@ -26,6 +32,9 @@ module priv_unit #(
     input  logic [31:0] pc,
     input  logic [31:0] rs1_data,
     input  logic        mtip, msip, meip,
+    input  logic        xcpt_valid = 1'b0,   // external synchronous exception
+    input  logic [31:0] xcpt_cause = 32'b0,
+    input  logic [31:0] xcpt_tval  = 32'b0,
     output logic        rd_we,          // CSR instr writes rd (rd != x0)
     output logic [31:0] rd_wdata,
     output logic        redirect,       // flush + jump to redirect_pc
@@ -88,9 +97,11 @@ module priv_unit #(
                               : dec_illegal) || (is_csr && csr_illegal);
 
     always @(*) begin
-        irq_taken  = instr_valid && irq_pend;
+        irq_taken  = instr_valid && irq_pend && !xcpt_valid;
         trap_take  = 1'b0; trap_cause = 32'b0; trap_tval = 32'b0;
-        if (irq_taken) begin
+        if (xcpt_valid) begin
+            trap_take = 1'b1; trap_cause = xcpt_cause; trap_tval = xcpt_tval;
+        end else if (irq_taken) begin
             trap_take = 1'b1; trap_cause = {1'b1, 26'b0, irq_code};
         end else if (instr_valid && illegal) begin
             trap_take = 1'b1; trap_cause = 32'd2;  trap_tval = instr;

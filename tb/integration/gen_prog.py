@@ -32,7 +32,7 @@ csrrw  = lambda rd, csr, rs1: i(csr, rs1, 1, rd, 0x73)
 csrrs  = lambda rd, csr, rs1: i(csr, rs1, 2, rd, 0x73)
 csrrsi = lambda rd, csr, uimm: i(csr, uimm, 6, rd, 0x73)
 ECALL, MRET = 0x00000073, 0x30200073
-MSTATUS, MISA, MIE, MTVEC, MSCRATCH, MEPC, MCAUSE = 0x300, 0x301, 0x304, 0x305, 0x340, 0x341, 0x342
+MSTATUS, MISA, MIE, MTVEC, MSCRATCH, MEPC, MCAUSE, MTVAL = 0x300, 0x301, 0x304, 0x305, 0x340, 0x341, 0x342, 0x343
 
 HANDLER = 40 * 4
 prog = {}
@@ -102,16 +102,27 @@ print("wrote", out)
 
 # ---- D-side Sv32 translation test (core_mmu_tb.sv, flat memory) ----
 # VA 0x0040_0000 megapage -> PA 0x0 (root table at PA 0x2000); VA 0x0080_0000 unmapped.
+MMU_H = 32                        # handler word index
 mmu = [
+    addi(8, 0, MMU_H * 4),
+    csrrw(0, MTVEC, 8),           # page faults now trap -> handler skips the load
     lui(1, 0x400),                # x1 = 0x0040_0000
     addi(2, 0, 0x55),
     sw(2, 1, 0x100),              # VA 0x400100 -> PA 0x100
     lw(3, 1, 0x100),              # 0x55 (via MMU + D-cache)
     lw(4, 1, 0x104),              # preset 0x1234
     lui(5, 0x800),
-    lw(6, 5, 0),                  # page fault -> squashed, x6 stays 0
-    addi(7, 0, 1),                # still executes
+    lw(6, 5, 0),                  # page fault -> trap (mcause 13), x6 stays 0
+    addi(7, 0, 1),                # runs after mret (handler skips the load)
     jal(0, 0),
+]
+mmu += [0x00000013] * (MMU_H - len(mmu))
+mmu += [
+    csrrs(9, MCAUSE, 0),          # x9 = mcause
+    csrrs(10, MEPC, 0),
+    addi(10, 10, 4),
+    csrrw(0, MEPC, 10),
+    MRET,
 ]
 out2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core_mmu_prog.hex")
 with open(out2, "w") as f:
@@ -161,3 +172,50 @@ with open(out3, "w") as f:
     for k in range(64):
         f.write("%08x\n" % (divp[k] if k < len(divp) else 0x00000013))
 print("wrote", out3)
+
+# ---- MMU page-fault trap test (core_pf_tb.sv, flat memory, USE_MMU=1) ----
+# satp root PA 0x2000. L1[1]: VA 0x0040_0000 -> PA 0 RW megapage; L1[2]: invalid
+# (VA 0x0080_0000); L1[3]: VA 0x00C0_0000 -> PA 0 read-only megapage;
+# L1[4]: pointer to L0 at PA 0x3000 whose entry 5 (VA 0x0100_5000) is invalid.
+PF_H = 64
+pf = []
+pf_pc = {}
+def P(w, tag=None):
+    if tag: pf_pc[tag] = 4 * len(pf)
+    pf.append(w)
+P(addi(1, 0, PF_H * 4)); P(csrrw(0, MTVEC, 1))
+P(lui(31, 0x400)); P(addi(31, 31, 0x300))     # trap log pointer: VA 0x400300 (PA 0x300)
+P(lui(2, 0x400))                              # RW megapage
+P(lui(3, 0x800))                              # unmapped
+P(lui(4, 0xC00))                              # read-only megapage
+P(lui(5, 0x1005))                             # two-level walk, invalid leaf
+P(addi(10, 0, 0x5A5)); P(addi(13, 0, 0x5A5))  # sentinels for faulting load rds
+P(addi(11, 0, 0x77))
+P(lw(10, 3, 0x24), "ld")                      # load page fault: VA 0x800024 -> 13
+P(addi(20, 20, 1))                            # must run exactly once after mret
+P(sw(11, 4, 0x180), "st")                     # store page fault: VA 0xC00180 (R only) -> 15
+P(addi(20, 20, 1))
+P(lw(12, 4, 0x180))                           # load through the R-only page works: PA 0x180
+P(lb(13, 5, 7), "ld2")                        # two-level walk, invalid L0 PTE -> 13
+P(addi(20, 20, 1))
+P(sw(11, 2, 0x184))                           # normal store still works: PA 0x184 = 0x77
+P(lui(22, 0xC0DE5)); P(addi(22, 22, 0x00D))   # signature 0xC0DE500D
+P(sw(22, 2, 0x3F0))                           # PA 0x3F0 = signature (after all traps)
+P(jal(0, 0))
+assert len(pf) <= PF_H
+pf += [0x00000013] * (PF_H - len(pf))
+pf += [
+    csrrs(25, MCAUSE, 0),
+    csrrs(26, MTVAL, 0),
+    csrrs(27, MEPC, 0),
+    sw(25, 31, 0), sw(26, 31, 4), sw(27, 31, 8),   # log {mcause, mtval, mepc}
+    addi(31, 31, 12),
+    addi(27, 27, 4), csrrw(0, MEPC, 27),           # skip the faulting instruction
+    addi(24, 24, 1),                               # trap count
+    MRET,
+]
+out4 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core_pf_prog.hex")
+with open(out4, "w") as f:
+    for k in range(128):
+        f.write("%08x\n" % (pf[k] if k < len(pf) else 0x00000013))
+print("wrote", out4, "fault pcs:", {k: hex(v) for k, v in pf_pc.items()})

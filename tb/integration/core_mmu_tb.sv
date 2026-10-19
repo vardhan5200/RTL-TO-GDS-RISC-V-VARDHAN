@@ -41,6 +41,8 @@ module core_mmu_tb;
         chk("x7 after fault",       dut.regs[7], 1);
         chk("PA 0x100 written",     mem[32'h100 >> 2], 32'h55);
         chk("mmu_fault",            mmu_fault, 1);
+        chk("x9 mcause (load PF)",  dut.regs[9], 13);
+        chk("mtval = fault VA",     dut.u_priv.u_csr.mtval_r, 32'h0080_0000);
         if (errors == 0) $display("CORE MMU: PASS"); else $display("CORE MMU: FAIL (%0d errors)", errors);
         $finish;
     end

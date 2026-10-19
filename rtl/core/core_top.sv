@@ -8,9 +8,13 @@
 //     (meip/mtip/msip inputs, e.g. meip from the SoC irq_ctrl).
 //   * optional Sv32 MMU (rtl/mmu/sv32_mmu.sv) on the data side, USE_MMU=1.
 //     satp/priv come from ports (csr_file has no satp / S/U modes yet), so in
-//     M-mode the MMU is a passthrough. MMU faults are NOT yet routed into
-//     priv_unit (it has no external-exception input); they squash the access
-//     and raise mmu_fault.
+//     M-mode the MMU is a passthrough. MMU faults raise a precise synchronous
+//     exception through priv_unit (xcpt_*): mcause = load/store page fault
+//     13/15 (or access fault 5/7), mtval = faulting VA, mepc = pc of the
+//     load/store. The access is squashed (no rd write, store never reaches the
+//     bus/cache), younger instructions are flushed and fetch jumps to mtvec.
+//     mmu_fault stays as a sticky status flag. (No I-side MMU, so instruction
+//     page faults (12) cannot occur yet.)
 //   * MUL (rtl/cpu/mul.sv) and DIV/DIVU/REM/REMU (rtl/cpu/div_unit.sv around
 //     rtl/cpu/div.sv) in EX: one start pulse, IF/ID/EX stall until done, the
 //     result is written back and forwarded to ID on the done cycle.
@@ -160,6 +164,7 @@ module core_top #(
     logic        mul_wait, div_wait, lsu_busy, ex_first;
     logic        p_rd_we, p_redirect, p_trap, p_irq, p_mret;
     logic [31:0] p_rd_wdata, p_redirect_pc, p_cause;
+    logic        mmu_xcpt;     // MMU fault on the EX load/store (defined in the LSU)
     // Present each instruction once, on its first EX cycle (before any
     // multi-cycle MUL / DIV / load starts), so a trap can cleanly squash it.
     assign ex_first = valid_ex && !mul_wait && !div_wait && !lsu_busy;
@@ -169,6 +174,7 @@ module core_top #(
         .instr((is_mul_ex || is_div_ex) ? NOP : instr_ex),   // decoder doesn't know M ops
         .pc(pc_ex), .rs1_data(rd1_ex),
         .mtip, .msip, .meip,
+        .xcpt_valid(mmu_xcpt), .xcpt_cause({28'b0, mmu_cause}), .xcpt_tval(vaddr),
         .rd_we(p_rd_we), .rd_wdata(p_rd_wdata),
         .redirect(p_redirect), .redirect_pc(p_redirect_pc),
         .trap(p_trap), .irq_taken(p_irq), .mret(p_mret), .cause_o(p_cause));
@@ -210,7 +216,7 @@ module core_top #(
     logic        mem_op, lsu_go, lsu_done, cacheable, acc_now;
     assign lsu_busy = (lsu_st != L_IDLE);
     assign mem_op   = valid_ex && (mem_read_ex || mem_write_ex) && !p_trap;
-    assign vaddr    = alu_y;
+    assign vaddr    = alu_y;     // ID/EX is held while the LSU is busy -> stable
 
     // MMU
     logic        mmu_req_valid, mmu_req_ready, mmu_resp_valid, mmu_pf, mmu_af;
@@ -250,8 +256,11 @@ module core_top #(
         load_word = dmem_rdata;
         if (st_now || ld_unc_now) lsu_done = 1'b1;
         if (lsu_st == L_CWAIT && dc_resp_valid) begin lsu_done = 1'b1; load_word = dc_resp_rdata; end
-        if (lsu_st == L_XLATE && mmu_resp_valid && (mmu_pf || mmu_af)) lsu_done = 1'b1; // squashed
+        if (mmu_xcpt) lsu_done = 1'b1; // squashed, trap taken
     end
+    // Translation fault -> precise exception (cause from the MMU's access type)
+    assign mmu_xcpt = USE_MMU && valid_ex && (mem_read_ex || mem_write_ex) &&
+                      (lsu_st == L_XLATE) && mmu_resp_valid && (mmu_pf || mmu_af);
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin lsu_st <= L_IDLE; paddr_q <= 0; mmu_fault <= 0; end
@@ -344,7 +353,7 @@ module core_top #(
     end
 
     logic squash_ld;
-    assign squash_ld = (lsu_st == L_XLATE) && mmu_resp_valid && (mmu_pf || mmu_af);
+    assign squash_ld = mmu_xcpt;
     assign ex_wen = valid_ex && !stall && !p_trap && !squash_ld && (rd_ex != 0) &&
                     (reg_write_ex || p_rd_we);
     assign retire = valid_ex && !stall && !p_trap;

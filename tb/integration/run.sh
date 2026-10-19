@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Integrated-core tests (Icarus Verilog): soc_core_top program test with and
 # without the MMU in the data path, a core-level Sv32 translation test and a
-# core-level DIV/DIVU/REM/REMU test.
+# core-level DIV/DIVU/REM/REMU test, and a core-level MMU page-fault trap test.
 set -u
 cd "$(dirname "$0")/../.."
 OUT=${SIM_OUT:-/tmp/integration_sim}; mkdir -p "$OUT"
@@ -22,4 +22,5 @@ run core_int        "CORE INTEGRATION: PASS" -s core_int_tb $SOC $CORE tb/integr
 run core_int_mmu    "CORE INTEGRATION: PASS" -s core_int_tb -P core_int_tb.USE_MMU=1 $SOC $CORE tb/integration/core_int_tb.sv
 run core_mmu        "CORE MMU: PASS"         -s core_mmu_tb $CORE tb/integration/core_mmu_tb.sv
 run core_div        "CORE DIV: PASS"         -s core_div_tb $CORE tb/integration/core_div_tb.sv
+run core_pf         "CORE PAGE FAULT: PASS"  -s core_pf_tb $CORE tb/integration/core_pf_tb.sv
 [ $fail -eq 0 ] && echo "ALL INTEGRATION TESTS PASSED" || { echo "INTEGRATION TESTS FAILED"; exit 1; }
