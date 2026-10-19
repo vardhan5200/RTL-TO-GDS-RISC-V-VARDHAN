@@ -288,3 +288,67 @@ with open(out5, "w") as f:
     for k in range(128):
         f.write("%08x\n" % (st[k] if k < len(st) else 0x00000013))
 print("wrote", out5, "fault pcs:", {k: hex(v) for k, v in st_pc.items()})
+
+# ---- instruction-fetch translation test (core_ifetch_tb.sv, flat 32 KiB, USE_MMU=1, priv_mode=S) ----
+# satp 0x80000002: root PA 0x2000, L1[0] -> L0 at PA 0x3000 (PTEs set by the tb):
+#   L0[0] VA 0x0000 -> PA 0x0000 RWX (main program, handler, log, signature)
+#   L0[1] VA 0x1000 -> PA 0x5000 RX  (code A; PA 0x1000 holds decoy code B)
+#   L0[2] invalid                     (wrong-path fall-through after VA 0x1FFC)
+#   L0[3] VA 0x3000 -> PA 0x6000 RW, no X (code there must not run)
+#   L0[4] invalid                     (VA 0x4000)
+#   L0[5] invalid                     (VA 0x5000; PA 0x5000 = code A, must not run)
+#   L0[6] VA 0x6000 -> PA 0x7000 RX  (code A2 at VA 0x6FF8 runs into VA 0x7000)
+#   L0[7] invalid
+# Written as a sparse $readmemh image (@word-address sections).
+jalr = lambda rd, rs1, imm: i(imm, rs1, 0, rd, 0x67)
+IF_H = 0x200
+ifm = []
+ifm_pc = {}
+def F(w, tag=None):
+    if tag: ifm_pc[tag] = 4 * len(ifm)
+    ifm.append(w)
+F(addi(2, 0, IF_H)); F(csrrw(0, MTVEC, 2))
+F(addi(31, 0, 0x300))                          # trap log pointer (PA 0x300)
+F(addi(7, 0, 100)); F(addi(8, 0, 7))
+for w in set_satp(9, 0x8000_0002): F(w)        # fetch translated from the next instruction on
+F(csrrs(20, SATP, 0))                          # x20 = 0x80000002
+F(jal(0x1000 - 4 * len(ifm), 1), "callA")      # VA 0x1000 -> PA 0x5000 (code A), returns
+F(lui(5, 0x4)); F(jalr(1, 5, 0), "j4000")      # unmapped VA 0x4000 -> fetch PF
+F(addi(21, 21, 1))
+F(lui(5, 0x3)); F(jalr(1, 5, 0), "j3000")      # VA 0x3000 mapped without X -> fetch PF
+F(addi(21, 21, 1))
+F(lui(5, 0x5)); F(jalr(1, 5, 0), "j5000")      # VA 0x5000 invalid (PA 0x5000 holds code) -> PF
+F(addi(21, 21, 1))
+F(lui(5, 0x7)); F(addi(5, 5, -8)); F(jalr(1, 5, 0), "j6ff8")  # A2 runs 2 instrs, then PF at 0x7000
+F(addi(21, 21, 1))
+F(lui(5, 0x2)); F(addi(5, 5, -8)); F(jalr(1, 5, 0), "j1ff8")  # DIV + return; wrong-path 0x2000 PF dropped
+F(addi(21, 21, 1))
+F(csrrw(0, SATP, 0)); F(csrrs(22, SATP, 0))    # Bare again
+F(lui(5, 0x1)); F(jalr(1, 5, 0), "callB")      # Bare: PA 0x1000 = code B
+F(lui(30, 0x1FE7C)); F(addi(30, 30, 0x00D))    # signature 0x1FE7C00D
+F(sw(30, 0, 0x3F0))
+F(jal(0, 0))
+assert 4 * len(ifm) <= IF_H
+ifh = [
+    csrrs(25, MCAUSE, 0), csrrs(26, MTVAL, 0), csrrs(27, MEPC, 0),
+    sw(25, 31, 0), sw(26, 31, 4), sw(27, 31, 8),   # log {mcause, mtval, mepc}
+    addi(31, 31, 12),
+    csrrw(0, MEPC, 1),                            # resume at the return address (ra)
+    addi(24, 24, 1),                              # trap count
+    MRET,
+]
+sections = {
+    0x0000: ifm,
+    IF_H:   ifh,
+    0x1000: [addi(23, 23, 0xB1), jalr(0, 1, 0)],                 # code B (PA 0x1000, Bare only)
+    0x5000: [addi(10, 10, 0xA1), addi(11, 10, 1), jalr(0, 1, 0)], # code A (VA 0x1000)
+    0x5FF8: [div(15, 7, 8), jalr(0, 1, 0)],                      # VA 0x1FF8: DIV stalls, then return
+    0x6000: [addi(29, 29, 1), jalr(0, 1, 0)],                    # VA 0x3000 (no X): must not run
+    0x7FF8: [addi(12, 0, 0x5E), addi(13, 0, 1)],                 # VA 0x6FF8: then falls into VA 0x7000
+}
+out6 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core_ifetch_prog.hex")
+with open(out6, "w") as f:
+    for base in sorted(sections):
+        f.write("@%x\n" % (base // 4))
+        for w in sections[base]: f.write("%08x\n" % w)
+print("wrote", out6, "pcs:", {k: hex(v) for k, v in ifm_pc.items()})

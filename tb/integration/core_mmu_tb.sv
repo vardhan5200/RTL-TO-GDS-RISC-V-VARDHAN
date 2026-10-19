@@ -14,6 +14,7 @@ module core_mmu_tb;
         for (int k = 0; k < 4096; k++) mem[k] = 32'h0;
         $readmemh("tb/integration/core_mmu_prog.hex", mem, 0, 63);
         mem[32'h104 >> 2]  = 32'h0000_1234;
+        mem[32'h2000 >> 2] = 32'h0000_00CB;   // L1[0]: code VA 0 -> PA 0 megapage, V|R|X|A|D (fetch is translated)
         mem[32'h2004 >> 2] = 32'h0000_00C7;   // L1[1]: megapage PPN 0, V|R|W|A|D
     end
     assign imem_rdata = mem[imem_addr[13:2]];

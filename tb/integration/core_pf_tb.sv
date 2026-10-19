@@ -21,6 +21,7 @@ module core_pf_tb;
         for (int k = 0; k < 4096; k++) mem[k] = 32'h0;
         $readmemh("tb/integration/core_pf_prog.hex", mem, 0, 127);
         mem[32'h180 >> 2]  = SENT;                // target of the faulting store
+        mem[32'h2000 >> 2] = 32'h0000_00CB;       // L1[0]: code VA 0 -> PA 0 megapage, V|R|X|A|D (fetch is translated)
         mem[32'h2004 >> 2] = 32'h0000_00C7;       // L1[1]: VA 0x400000 -> PA 0, V|R|W|A|D
         mem[32'h2008 >> 2] = 32'h0000_0000;       // L1[2]: invalid
         mem[32'h200C >> 2] = 32'h0000_0043;       // L1[3]: VA 0xC00000 -> PA 0, V|R|A (no W)
