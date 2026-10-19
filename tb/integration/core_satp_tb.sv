@@ -30,10 +30,12 @@ module core_satp_tb;
         mem[32'h5004 >> 2] = 32'h0;
         // root A (PA 0x2000): L1[0] -> L0 at PA 0x3000
         mem[32'h2000 >> 2] = 32'h0000_0C01;
+        mem[32'h3000 >> 2] = 32'h0000_00CB;   // L0[0]: code page VA 0 -> PA 0, V|R|X|A|D (fetch is translated)
         mem[32'h3004 >> 2] = 32'h0000_14C7;   // L0[1]: VA 0x1000 -> PPN 5, V|R|W|A|D
         mem[32'h3010 >> 2] = 32'h0000_0000;   // L0[4]: VA 0x4000 invalid
         // root B (PA 0x6000): L1[0] -> L0 at PA 0x7000
         mem[32'h6000 >> 2] = 32'h0000_1C01;
+        mem[32'h7000 >> 2] = 32'h0000_00CB;   // L0[0]: code page VA 0 -> PA 0, V|R|X|A|D
         mem[32'h7004 >> 2] = 32'h0000_10C7;   // L0[1]: VA 0x1000 -> PPN 4, V|R|W|A|D
     end
     assign imem_rdata = mem[imem_addr[14:2]];

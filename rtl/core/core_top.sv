@@ -6,13 +6,13 @@
 //   * M-mode CSR/trap unit (rtl/priv/priv_unit.sv) at the commit point (EX):
 //     CSR ops, ECALL/EBREAK/illegal traps, MRET, machine interrupts
 //     (meip/mtip/msip inputs, e.g. meip from the SoC irq_ctrl).
-//   * optional Sv32 MMU (rtl/mmu/sv32_mmu.sv) on the data side, USE_MMU=1
+//   * optional Sv32 MMUs (rtl/mmu/sv32_mmu.sv) on the data and fetch side, USE_MMU=1
 //     (hardware present). satp comes from the satp CSR (0x180, csr_file):
 //     software writes it with CSRW; MODE=0 -> Bare (PA = VA), MODE=1 -> Sv32
 //     translation with the root table at PPN<<12. Every committed satp write
-//     flushes the whole TLB (no ASIDs; there is no SFENCE.VMA instruction yet).
+//     flushes both TLBs (no ASIDs; there is no SFENCE.VMA instruction yet).
 //     The core only implements M-mode, and the MMU never translates in M-mode,
-//     so the priv_mode port gives the effective privilege for data accesses
+//     so the priv_mode port gives the effective privilege for data accesses and fetch
 //     (bring-up / test hook): tie 2'b11 -> always Bare; 2'b01 (S) -> satp
 //     decides. With USE_MMU=0 satp is still a read/write CSR but has no effect.
 //     MMU faults raise a precise synchronous
@@ -26,7 +26,24 @@
 //     rtl/cpu/div.sv) in EX: one start pulse, IF/ID/EX stall until done, the
 //     result is written back and forwarded to ID on the done cycle.
 //     DIV latency: 33 cycles in EX (32 iterations + start), i.e. 32 stall cycles.
-// The instruction side fetches combinationally from imem (no I-cache / I-MMU).
+// Instruction side: imem is read combinationally (no I-cache in this branch).
+// With USE_MMU=1 fetch is translated by a second sv32_mmu instance (I-MMU,
+// own 4-entry I-TLB, req_acc=fetch) whenever satp.MODE=1 and priv_mode is not
+// M (same rule as the data side). A 1-entry fetch translation register (last
+// VPN -> PPN / fault) lets sequential fetches in a page run at 1 IPC; on a miss
+// the PC holds, a bubble enters ID and the I-MMU translates (TLB hit: 1 cycle,
+// miss: two-level walk on the shared data bus). Bare (MODE=0 or M-mode):
+// imem_addr = pc, exactly as without the MMU. A fetch fault (12 page fault /
+// 1 access fault) is carried with the instruction (fault_id/fault_ex, as a
+// NOP) and raised through priv_unit's xcpt_* port only when it reaches EX, so
+// older instructions complete first and wrong-path fetch faults are flushed
+// with the instruction. mtval = mepc = faulting virtual PC. The fetch
+// translation register is cleared on satp writes and on every trap/mret.
+// A satp write also flushes both TLBs and the pipeline (refetch at pc+4 under
+// the new translation).
+// Data-bus arbitration with the I-side walker: the data side (older
+// instruction) wins; the I-MMU only starts a translation when no load/store is
+// in EX, and a load/store waits in EX while an I-translation is in flight.
 // Data bus: one combinational-read port shared by the cache refill, the MMU
 // walker and uncached/stores (all serialized by EX stalls).
 `timescale 1ns/1ps
@@ -53,19 +70,50 @@ module core_top #(
 
     logic        stall, flush, retire;
     logic [31:0] pc, next_pc, redirect_pc;
+    // Forward declarations: used in IF, driven further down.
+    logic        p_redirect;   // priv_unit trap / mret redirect
+    logic [31:0] csr_satp;     // satp CSR -> MMUs
+    logic        csr_satp_wr;  // satp write committed -> TLB flushes, pipeline flush
+    logic        lsu_busy;     // data side translation / access in progress
+    logic        mem_op;       // load/store in EX
 
-    // ---------------- IF ----------------
+    // ---------------- IF (optional Sv32 fetch translation) ----------------
+    logic        if_valid;     // instruction (or fetch fault) available for pc
+    logic [31:0] if_instr;
+    logic        if_fault;     // fetch fault for pc
+    logic [3:0]  if_fcause;    // 12 page fault / 1 access fault
+    logic        i_bare;       // fetch untranslated (PA = VA)
+    logic        ifx_valid, ifx_fault, ifx_hit;   // fetch translation register
+    logic [19:0] ifx_vpn;
+    logic [21:0] ifx_ppn;
+    logic [3:0]  ifx_cause;
+    logic [33:0] if_paddr;
+
     always_ff @(posedge clk or negedge rst_n)
-        if (!rst_n)      pc <= 32'h0;
-        else if (!stall) pc <= next_pc;
-    assign imem_addr = pc;
+        if (!rst_n)                             pc <= 32'h0;
+        else if (!stall && (if_valid || flush)) pc <= next_pc;
+
+    assign i_bare    = !USE_MMU || !csr_satp[31] || (priv_mode == 2'b11);
+    assign ifx_hit   = ifx_valid && (ifx_vpn == pc[31:12]);
+    assign if_paddr  = {ifx_ppn, pc[11:0]};
+    assign imem_addr = i_bare ? pc : if_paddr[31:0];
+    assign if_valid  = i_bare || ifx_hit;
+    assign if_fault  = !i_bare && ifx_hit && ifx_fault;
+    assign if_fcause = ifx_cause;
+    assign if_instr  = if_fault ? NOP : imem_rdata;
 
     logic [31:0] instr_id, pc_id;
-    logic        bubble_id;
+    logic        bubble_id, fault_id;
+    logic [3:0]  fcause_id;
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n)      begin instr_id <= NOP; pc_id <= 32'h0; bubble_id <= 1; end
-        else if (flush)  begin instr_id <= NOP; pc_id <= 32'h0; bubble_id <= 1; end
-        else if (!stall) begin instr_id <= imem_rdata; pc_id <= pc; bubble_id <= 0; end
+        if (!rst_n || flush) begin
+            instr_id <= NOP; pc_id <= 32'h0; bubble_id <= 1; fault_id <= 0; fcause_id <= 4'd0;
+        end else if (!stall && if_valid) begin
+            instr_id <= if_instr; pc_id <= pc; bubble_id <= 0;
+            fault_id <= if_fault; fcause_id <= if_fcause;
+        end else if (!stall) begin   // fetch translation pending: bubble
+            instr_id <= NOP; pc_id <= pc; bubble_id <= 1; fault_id <= 0; fcause_id <= 4'd0;
+        end
     end
 
     // ---------------- ID ----------------
@@ -118,7 +166,8 @@ module core_top #(
 
     // ---------------- ID/EX ----------------
     logic        valid_ex, reg_write_ex, alu_src_b_ex, branch_ex, jump_ex, jalr_ex, is_mul_ex, is_div_ex;
-    logic        mem_read_ex, mem_write_ex;
+    logic        mem_read_ex, mem_write_ex, fault_ex;
+    logic [3:0]  fcause_ex;
     logic [31:0] pc_ex, rd1_ex, rd2_ex, imm_ex, instr_ex;
     logic [3:0]  alu_op_ex;
     logic [2:0]  funct3_ex;
@@ -129,6 +178,7 @@ module core_top #(
             valid_ex <= 0; reg_write_ex <= 0; alu_src_b_ex <= 0;
             branch_ex <= 0; jump_ex <= 0; jalr_ex <= 0; is_mul_ex <= 0; is_div_ex <= 0;
             mem_read_ex <= 0; mem_write_ex <= 0; instr_ex <= NOP;
+            fault_ex <= 0; fcause_ex <= 4'd0;
             pc_ex <= 0; rd1_ex <= 0; rd2_ex <= 0; imm_ex <= 0;
             alu_op_ex <= 0; funct3_ex <= 0; opcode_ex <= 0; wb_sel_ex <= 0; rd_ex <= 0;
         end else if (!stall) begin
@@ -143,6 +193,8 @@ module core_top #(
             mem_read_ex  <= mem_read_id && ok_id && valid_id;
             mem_write_ex <= mem_write_id && ok_id && valid_id;
             instr_ex     <= instr_id;
+            fault_ex     <= fault_id && valid_id;
+            fcause_ex    <= fcause_id;
             pc_ex <= pc_id; rd1_ex <= rd1_id; rd2_ex <= rd2_id; imm_ex <= imm_id;
             alu_op_ex <= alu_op_id; funct3_ex <= funct3_id; opcode_ex <= opcode_id;
             wb_sel_ex <= wb_sel_id; rd_ex <= rd_id;
@@ -167,8 +219,8 @@ module core_top #(
                       .pc(pc_ex), .imm(imm_ex), .taken(bu_taken), .target(bu_target));
 
     // ---- privileged unit at the commit point ----
-    logic        mul_wait, div_wait, lsu_busy, ex_first;
-    logic        p_rd_we, p_redirect, p_trap, p_irq, p_mret;
+    logic        mul_wait, div_wait, ex_first;
+    logic        p_rd_we, p_trap, p_irq, p_mret;
     logic [31:0] p_rd_wdata, p_redirect_pc, p_cause;
     logic        mmu_xcpt;     // MMU fault on the EX load/store (defined in the LSU)
     // Declared here (before priv_unit uses them); driven in the LSU section below.
@@ -176,27 +228,39 @@ module core_top #(
     logic [3:0]  mmu_cause;    // MMU fault cause (12/13/15, 1/5/7)
     logic [31:0] mmu_xcpt_cause;
     assign mmu_xcpt_cause = {28'b0, mmu_cause};
-    logic [31:0] csr_satp;     // satp CSR -> MMU
-    logic        csr_satp_wr;  // satp write committed -> TLB flush
     // Present each instruction once, on its first EX cycle (before any
     // multi-cycle MUL / DIV / load starts), so a trap can cleanly squash it.
     assign ex_first = valid_ex && !mul_wait && !div_wait && !lsu_busy;
+    // Synchronous exception into priv_unit: a fetch fault carried with the
+    // instruction now in EX, or a data-side MMU fault of the load/store in EX.
+    // Both belong to the instruction in EX (the oldest), and they cannot both
+    // be set (a fetch-faulted instruction is a NOP with no memory access);
+    // the fetch fault is listed first because it is detected first.
+    logic        if_xcpt, xcpt_any;
+    logic [31:0] xcpt_cause_c, xcpt_tval_c;
+    assign if_xcpt      = ex_first && fault_ex;
+    assign xcpt_any     = if_xcpt || mmu_xcpt;
+    assign xcpt_cause_c = if_xcpt ? {28'b0, fcause_ex} : mmu_xcpt_cause;
+    assign xcpt_tval_c  = if_xcpt ? pc_ex : vaddr;
     priv_unit u_priv (
         .clk, .rst_n,
         .instr_valid(ex_first),
         .instr((is_mul_ex || is_div_ex) ? NOP : instr_ex),   // decoder doesn't know M ops
         .pc(pc_ex), .rs1_data(rd1_ex),
         .mtip, .msip, .meip,
-        .xcpt_valid(mmu_xcpt), .xcpt_cause(mmu_xcpt_cause), .xcpt_tval(vaddr),
+        .xcpt_valid(xcpt_any), .xcpt_cause(xcpt_cause_c), .xcpt_tval(xcpt_tval_c),
         .rd_we(p_rd_we), .rd_wdata(p_rd_wdata),
         .redirect(p_redirect), .redirect_pc(p_redirect_pc),
         .trap(p_trap), .irq_taken(p_irq), .mret(p_mret), .cause_o(p_cause),
         .satp_o(csr_satp), .satp_wr_o(csr_satp_wr));
 
-    logic br_flush;
+    logic br_flush, satp_flush;
     assign br_flush    = valid_ex && !p_trap && (bu_taken || jalr_ex);
-    assign flush       = p_redirect || br_flush;
+    // satp write: refetch the following instructions under the new translation
+    assign satp_flush  = USE_MMU && csr_satp_wr && !p_trap;
+    assign flush       = p_redirect || br_flush || satp_flush;
     assign redirect_pc = p_redirect ? p_redirect_pc :
+                         satp_flush ? (pc_ex + 32'd4) :
                          jalr_ex    ? ((rd1_ex + imm_ex) & ~32'h1) : bu_target;
     assign next_pc     = flush ? redirect_pc : pc + 32'd4;
 
@@ -227,7 +291,7 @@ module core_top #(
     logic [1:0]  lsu_st;
     logic [31:0] paddr, paddr_q, load_word, load_data, st_wdata;
     logic [3:0]  st_strb;
-    logic        mem_op, lsu_go, lsu_done, cacheable, acc_now;
+    logic        lsu_go, lsu_done, cacheable, acc_now;
     assign lsu_busy = (lsu_st != L_IDLE);
     assign mem_op   = valid_ex && (mem_read_ex || mem_write_ex) && !p_trap;
     assign vaddr    = alu_y;     // ID/EX is held while the LSU is busy -> stable
@@ -239,6 +303,19 @@ module core_top #(
     logic [33:0] ptw_addr;
     logic        ptw_pend;     // PTW read outstanding on the shared bus
     logic [31:0] ptw_addr_q;
+
+    // I-side MMU (fetch translation)
+    logic        immu_req_valid, immu_req_ready, immu_resp_valid, immu_pf, immu_af;
+    logic [33:0] immu_paddr;
+    logic [3:0]  immu_cause;
+    logic        iptw_req_valid, iptw_req_ready, iptw_resp_valid, iptw_resp_ready;
+    logic [33:0] iptw_addr;
+    logic        iptw_pend;    // I-PTW read outstanding on the shared bus
+    logic [31:0] iptw_addr_q;
+    logic        i_inflight;   // I-MMU request accepted, response not yet seen
+    logic        i_drop;       // discard the in-flight response (satp write / trap / mret)
+    logic        i_inval;      // clear the fetch translation register now
+    logic [19:0] i_vpn_q;      // VPN of the in-flight fetch translation
 
     // D-cache
     logic        dc_req_valid, dc_req_ready, dc_resp_valid, dc_mem_re;
@@ -262,7 +339,37 @@ module core_top #(
     assign ld_unc_now = acc_now && mem_read_ex && !cacheable;
     assign ld_c_issue = acc_now && mem_read_ex && cacheable;
     assign dc_req_valid = ld_c_issue;
-    assign mmu_req_valid = USE_MMU && mem_op && lsu_st == L_IDLE;
+    // data side waits while a fetch translation is in flight (shared PTE bus)
+    assign mmu_req_valid = USE_MMU && mem_op && lsu_st == L_IDLE && !i_inflight;
+
+    // ---- fetch translation register / I-MMU request ----
+    assign i_inval = csr_satp_wr || p_redirect;
+    // Start a fetch translation only when no load/store is in EX (the older
+    // data access has priority on the shared bus) and fetch is not being
+    // redirected this cycle.
+    assign immu_req_valid = USE_MMU && !i_bare && !ifx_hit && !i_inflight &&
+                            !mem_op && !lsu_busy && !flush && !i_inval;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            i_inflight <= 1'b0; i_drop <= 1'b0; i_vpn_q <= 20'b0;
+            ifx_valid <= 1'b0; ifx_vpn <= 20'b0; ifx_ppn <= 22'b0;
+            ifx_fault <= 1'b0; ifx_cause <= 4'd0;
+        end else begin
+            if (immu_req_valid && immu_req_ready) begin
+                i_inflight <= 1'b1; i_drop <= 1'b0; i_vpn_q <= pc[31:12];
+            end else if (i_inflight && immu_resp_valid) begin   // resp_ready = 1
+                i_inflight <= 1'b0;
+                if (!i_drop && !i_inval) begin
+                    ifx_valid <= 1'b1;            ifx_vpn   <= i_vpn_q;
+                    ifx_ppn   <= immu_paddr[33:12];
+                    ifx_fault <= immu_pf || immu_af; ifx_cause <= immu_cause;
+                end
+            end else if (i_inflight && i_inval) begin
+                i_drop <= 1'b1;
+            end
+            if (i_inval) ifx_valid <= 1'b0;
+        end
+    end
 
     always_comb begin
         lsu_done  = 1'b0;
@@ -328,14 +435,40 @@ module core_top #(
             if (!rst_n) begin ptw_pend <= 0; ptw_addr_q <= 0; end
             else if (ptw_req_valid && ptw_req_ready) begin ptw_pend <= 1; ptw_addr_q <= ptw_addr[31:0]; end
             else if (ptw_resp_valid && ptw_resp_ready) ptw_pend <= 0;
-        assign ptw_req_ready  = !ptw_pend;
+        assign ptw_req_ready  = !ptw_pend && !iptw_pend;
         assign ptw_resp_valid = ptw_pend;
+
+        // I-MMU: fetch translation, own I-TLB, PTE reads on the same bus
+        sv32_mmu #(.TLB_ENTRIES(4)) u_immu (
+            .clk, .rst_n,
+            .satp(csr_satp), .priv(priv_mode), .sum(1'b0), .mxr(1'b0), .flush(csr_satp_wr),
+            .req_valid(immu_req_valid), .req_ready(immu_req_ready),
+            .req_vaddr(pc), .req_acc(2'd2),
+            .resp_valid(immu_resp_valid), .resp_ready(1'b1),
+            .resp_paddr(immu_paddr), .resp_page_fault(immu_pf),
+            .resp_access_fault(immu_af), .resp_cause(immu_cause),
+            .mem_req_valid(iptw_req_valid), .mem_req_ready(iptw_req_ready),
+            .mem_req_addr(iptw_addr), .mem_resp_valid(iptw_resp_valid),
+            .mem_resp_ready(iptw_resp_ready), .mem_resp_rdata(dmem_rdata),
+            .mem_resp_error(1'b0));
+        always_ff @(posedge clk or negedge rst_n)
+            if (!rst_n) begin iptw_pend <= 0; iptw_addr_q <= 0; end
+            else if (iptw_req_valid && iptw_req_ready) begin iptw_pend <= 1; iptw_addr_q <= iptw_addr[31:0]; end
+            else if (iptw_resp_valid && iptw_resp_ready) iptw_pend <= 0;
+        // bus free: no data-side walk / refill / access in progress
+        assign iptw_req_ready  = !iptw_pend && !ptw_pend && !dc_mem_re && !lsu_busy;
+        assign iptw_resp_valid = iptw_pend;
     end else begin : g_nommu
         assign mmu_req_ready = 1'b0; assign mmu_resp_valid = 1'b0;
         assign mmu_paddr = '0; assign mmu_pf = 1'b0; assign mmu_af = 1'b0; assign mmu_cause = '0;
         assign ptw_req_valid = 1'b0; assign ptw_addr = '0; assign ptw_resp_ready = 1'b0;
         assign ptw_req_ready = 1'b0; assign ptw_resp_valid = 1'b0;
         assign ptw_pend = 1'b0; assign ptw_addr_q = '0;
+        assign immu_req_ready = 1'b0; assign immu_resp_valid = 1'b0;
+        assign immu_paddr = '0; assign immu_pf = 1'b0; assign immu_af = 1'b0; assign immu_cause = '0;
+        assign iptw_req_valid = 1'b0; assign iptw_addr = '0; assign iptw_resp_ready = 1'b0;
+        assign iptw_req_ready = 1'b0; assign iptw_resp_valid = 1'b0;
+        assign iptw_pend = 1'b0; assign iptw_addr_q = '0;
     end endgenerate
 
     // ---- shared data bus mux: cache refill > PTW > core access ----
@@ -345,6 +478,8 @@ module core_top #(
             dmem_re = 1'b1; dmem_addr = dc_mem_addr;
         end else if (ptw_pend) begin
             dmem_re = 1'b1; dmem_addr = ptw_addr_q;
+        end else if (iptw_pend) begin
+            dmem_re = 1'b1; dmem_addr = iptw_addr_q;
         end else if (st_now) begin
             dmem_we = 1'b1; dmem_wstrb = st_strb;
         end else if (ld_unc_now) begin
