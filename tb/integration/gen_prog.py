@@ -22,6 +22,10 @@ sw   = lambda rs2, rs1, imm: s(imm, rs2, rs1, 2)
 sb   = lambda rs2, rs1, imm: s(imm, rs2, rs1, 0)
 mul  = lambda rd, rs1, rs2: r(1, rs2, rs1, 0, rd, 0x33)
 div  = lambda rd, rs1, rs2: r(1, rs2, rs1, 4, rd, 0x33)
+divu = lambda rd, rs1, rs2: r(1, rs2, rs1, 5, rd, 0x33)
+rem  = lambda rd, rs1, rs2: r(1, rs2, rs1, 6, rd, 0x33)
+remu = lambda rd, rs1, rs2: r(1, rs2, rs1, 7, rd, 0x33)
+mulh = lambda rd, rs1, rs2: r(1, rs2, rs1, 1, rd, 0x33)
 add  = lambda rd, rs1, rs2: r(0, rs2, rs1, 0, rd, 0x33)
 lui  = lambda rd, imm20: ((imm20 & 0xfffff)<<12)|(rd<<7)|0x37
 csrrw  = lambda rd, csr, rs1: i(csr, rs1, 1, rd, 0x73)
@@ -56,7 +60,7 @@ at(0,
    csrrs(13, MSCRATCH, 0),       # 18: 6
    ECALL,                        # 19: trap cause 11
    addi(14, 0, 1),               # 20: runs after mret
-   div(27, 1, 2),                # 21: DIV not implemented -> illegal (cause 2)
+   mulh(27, 1, 2),               # 21: MULH not implemented -> illegal (cause 2)
    addi(15, 0, 0x210),           # 22: timer base
    lw(16, 15, 0),                # 23: COUNT (uncached MMIO)
    addi(16, 16, 40),             # 24
@@ -114,3 +118,46 @@ with open(out2, "w") as f:
     for k in range(64):
         f.write("%08x\n" % (mmu[k] if k < len(mmu) else 0x00000013))
 print("wrote", out2)
+
+# ---- DIV/DIVU/REM/REMU test (core_div_tb.sv, flat memory) ----
+divp = [
+    addi(1, 0, 20), addi(2, 0, 3),
+    div(3, 1, 2),                 # 2: 20/3 = 6 (RAW on x1/x2 right behind the addis)
+    add(4, 3, 1),                 # 3: back-to-back dependent ADD: 26
+    divu(5, 1, 2),                # 4: 6
+    rem(6, 1, 2),                 # 5: 2
+    remu(7, 1, 2),                # 6: 2
+    addi(8, 0, -20),              # 7
+    div(9, 8, 2),                 # 8: -6
+    rem(10, 8, 2),                # 9: -2
+    divu(11, 8, 2),               # 10: 0xFFFFFFEC/3
+    remu(12, 8, 2),               # 11
+    div(13, 1, 0),                # 12: x/0 -> -1
+    rem(14, 1, 0),                # 13: x/0 rem -> 20
+    divu(15, 8, 0),               # 14: 0xFFFFFFFF
+    remu(16, 8, 0),               # 15: -20
+    lui(17, 0x80000),             # 16: INT_MIN
+    addi(18, 0, -1),              # 17
+    div(19, 17, 18),              # 18: INT_MIN/-1 -> INT_MIN
+    rem(20, 17, 18),              # 19: 0
+    div(21, 1, 2),                # 20: 6
+    b(8, 3, 21, 0),               # 21: beq x21, x3, +8 (taken, uses DIV result)
+    addi(22, 0, 99),              # 22: skipped
+    addi(23, 0, 1),               # 23
+    addi(24, 0, 0x100),           # 24
+    sw(1, 24, 0),                 # 25: mem[0x100] = 20
+    div(25, 1, 2),                # 26: 6
+    lw(26, 24, 0),                # 27: load right after DIV: 20
+    add(27, 26, 25),              # 28: 26
+    sw(25, 24, 4),                # 29: store DIV result
+    lw(28, 24, 4),                # 30: 6
+    div(29, 1, 2),                # 31: 6
+    div(30, 29, 2),               # 32: DIV->DIV dependent: 2
+    addi(31, 0, 1),               # 33: done flag
+    jal(0, 0),                    # 34
+]
+out3 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core_div_prog.hex")
+with open(out3, "w") as f:
+    for k in range(64):
+        f.write("%08x\n" % (divp[k] if k < len(divp) else 0x00000013))
+print("wrote", out3)

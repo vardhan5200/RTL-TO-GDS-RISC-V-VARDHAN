@@ -1,4 +1,4 @@
-// core_top.sv — integrated RV32I(+MUL) core: pipeline_branch-style 3-stage
+// core_top.sv — integrated RV32I(+MUL/DIV/DIVU/REM/REMU) core: pipeline_branch-style 3-stage
 // pipeline (IF / ID / EX+MEM+WB) with
 //   * L1 D-cache (rtl/cache/dm_cache.sv) for loads in [CACHE_BASE, CACHE_LIMIT);
 //     stores are write-through (bus write + cache word update on hit, no
@@ -11,6 +11,10 @@
 //     M-mode the MMU is a passthrough. MMU faults are NOT yet routed into
 //     priv_unit (it has no external-exception input); they squash the access
 //     and raise mmu_fault.
+//   * MUL (rtl/cpu/mul.sv) and DIV/DIVU/REM/REMU (rtl/cpu/div_unit.sv around
+//     rtl/cpu/div.sv) in EX: one start pulse, IF/ID/EX stall until done, the
+//     result is written back and forwarded to ID on the done cycle.
+//     DIV latency: 33 cycles in EX (32 iterations + start), i.e. 32 stall cycles.
 // The instruction side fetches combinationally from imem (no I-cache / I-MMU).
 // Data bus: one combinational-read port shared by the cache refill, the MMU
 // walker and uncached/stores (all serialized by EX stalls).
@@ -79,12 +83,15 @@ module core_top #(
     logic [31:0] imm_id;
     imm_gen u_imm (.instr(instr_id), .imm_sel(imm_sel_id), .imm(imm_id));
 
-    logic is_mul_id, ok_id, valid_id;
+    logic is_mul_id, is_div_id, ok_id, valid_id;
     assign is_mul_id = (opcode_id == 7'b0110011) && (instr_id[31:25] == 7'h01) &&
                        (funct3_id == 3'b000);
+    // DIV/DIVU/REM/REMU: funct7=0000001, funct3=1xx
+    assign is_div_id = (opcode_id == 7'b0110011) && (instr_id[31:25] == 7'h01) &&
+                       funct3_id[2];
     // Every real instruction goes to EX; priv_unit traps illegal ones there.
     assign valid_id = !bubble_id;
-    assign ok_id    = !illegal_id || is_mul_id;   // side effects allowed
+    assign ok_id    = !illegal_id || is_mul_id || is_div_id;   // side effects allowed
 
     logic [31:0] regs [0:31];
     logic        ex_wen;
@@ -100,7 +107,7 @@ module core_top #(
     end
 
     // ---------------- ID/EX ----------------
-    logic        valid_ex, reg_write_ex, alu_src_b_ex, branch_ex, jump_ex, jalr_ex, is_mul_ex;
+    logic        valid_ex, reg_write_ex, alu_src_b_ex, branch_ex, jump_ex, jalr_ex, is_mul_ex, is_div_ex;
     logic        mem_read_ex, mem_write_ex;
     logic [31:0] pc_ex, rd1_ex, rd2_ex, imm_ex, instr_ex;
     logic [3:0]  alu_op_ex;
@@ -110,18 +117,19 @@ module core_top #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n || flush) begin
             valid_ex <= 0; reg_write_ex <= 0; alu_src_b_ex <= 0;
-            branch_ex <= 0; jump_ex <= 0; jalr_ex <= 0; is_mul_ex <= 0;
+            branch_ex <= 0; jump_ex <= 0; jalr_ex <= 0; is_mul_ex <= 0; is_div_ex <= 0;
             mem_read_ex <= 0; mem_write_ex <= 0; instr_ex <= NOP;
             pc_ex <= 0; rd1_ex <= 0; rd2_ex <= 0; imm_ex <= 0;
             alu_op_ex <= 0; funct3_ex <= 0; opcode_ex <= 0; wb_sel_ex <= 0; rd_ex <= 0;
         end else if (!stall) begin
             valid_ex     <= valid_id;
-            reg_write_ex <= (reg_write_id || is_mul_id) && ok_id && valid_id;
+            reg_write_ex <= (reg_write_id || is_mul_id || is_div_id) && ok_id && valid_id;
             alu_src_b_ex <= alu_src_b_id;
             branch_ex    <= branch_id && ok_id && valid_id;
             jump_ex      <= jump_id && ok_id && valid_id;
             jalr_ex      <= jalr_id && ok_id && valid_id;
             is_mul_ex    <= is_mul_id && valid_id;
+            is_div_ex    <= is_div_id && valid_id;
             mem_read_ex  <= mem_read_id && ok_id && valid_id;
             mem_write_ex <= mem_write_id && ok_id && valid_id;
             instr_ex     <= instr_id;
@@ -149,16 +157,16 @@ module core_top #(
                       .pc(pc_ex), .imm(imm_ex), .taken(bu_taken), .target(bu_target));
 
     // ---- privileged unit at the commit point ----
-    logic        mul_wait, lsu_busy, ex_first;
+    logic        mul_wait, div_wait, lsu_busy, ex_first;
     logic        p_rd_we, p_redirect, p_trap, p_irq, p_mret;
     logic [31:0] p_rd_wdata, p_redirect_pc, p_cause;
     // Present each instruction once, on its first EX cycle (before any
-    // multi-cycle MUL / load starts), so a trap can cleanly squash it.
-    assign ex_first = valid_ex && !mul_wait && !lsu_busy;
+    // multi-cycle MUL / DIV / load starts), so a trap can cleanly squash it.
+    assign ex_first = valid_ex && !mul_wait && !div_wait && !lsu_busy;
     priv_unit u_priv (
         .clk, .rst_n,
         .instr_valid(ex_first),
-        .instr(is_mul_ex ? NOP : instr_ex),   // decoder doesn't know MUL
+        .instr((is_mul_ex || is_div_ex) ? NOP : instr_ex),   // decoder doesn't know M ops
         .pc(pc_ex), .rs1_data(rd1_ex),
         .mtip, .msip, .meip,
         .rd_we(p_rd_we), .rd_wdata(p_rd_wdata),
@@ -182,6 +190,17 @@ module core_top #(
         if (!rst_n)         mul_wait <= 0;
         else if (mul_start) mul_wait <= 1;
         else if (mul_done)  mul_wait <= 0;
+
+    // ---- divider (DIV/DIVU/REM/REMU), same handshake as the multiplier ----
+    logic div_start, div_done;
+    logic [31:0] div_result;
+    assign div_start = valid_ex && is_div_ex && !div_wait && !p_trap;
+    div_unit u_div (.clk, .rst_n, .start(div_start), .op(funct3_ex[1:0]),
+                    .a(rd1_ex), .b(rd2_ex), .result(div_result), .done(div_done));
+    always_ff @(posedge clk or negedge rst_n)
+        if (!rst_n)         div_wait <= 0;
+        else if (div_start) div_wait <= 1;
+        else if (div_done)  div_wait <= 0;
 
     // ---- load/store unit (optional MMU -> D-cache / uncached bus) ----
     localparam logic [1:0] L_IDLE = 2'd0, L_XLATE = 2'd1, L_ACC = 2'd2, L_CWAIT = 2'd3;
@@ -312,10 +331,12 @@ module core_top #(
     end
 
     // ---- stall / writeback ----
-    assign stall = !p_trap && ((valid_ex && is_mul_ex && !mul_done) || (mem_op && !lsu_done));
+    assign stall = !p_trap && ((valid_ex && is_mul_ex && !mul_done) ||
+                               (valid_ex && is_div_ex && !div_done) || (mem_op && !lsu_done));
 
     always_comb begin
         if (is_mul_ex)            ex_result = mul_result;
+        else if (is_div_ex)       ex_result = div_result;
         else if (mem_read_ex)     ex_result = load_data;
         else if (p_rd_we)         ex_result = p_rd_wdata;
         else if (wb_sel_ex == 2)  ex_result = pc_ex + 32'd4;
