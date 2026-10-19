@@ -59,7 +59,7 @@ module priv_unit_tb;
         #12 rst_n = 1; @(posedge clk); #1;
 
         // ---------- basic CSR ops ----------
-        rdcsr(12'h301, v); check("misa", v, 32'h4000_1100);
+        rdcsr(12'h301, v); check("misa (I,M,S,U)", v, 32'h4014_1100);
         rdcsr(12'hF14, v); check("mhartid", v, 0);
         check("csrrs rd_we", s_rd_we, 1); check("csr no trap", s_trap, 0);
         rdcsr(12'h300, v); check("mstatus reset (MPP=M)", v, 32'h0000_1800);
@@ -104,7 +104,7 @@ module priv_unit_tb;
         step(MRET, 32'h108);
         check("mret flag", s_mret, 1); check("mret redirect", s_redirect, 1);
         check("mret target", s_rpc, 32'h44); check("mret not trap", s_trap, 0);
-        rdcsr(12'h300, v); check("mret: MIE restored", v, 32'h0000_1888);
+        rdcsr(12'h300, v); check("mret: MIE restored, MPP=U", v, 32'h0000_0088);
 
         // ---------- illegal instructions ----------
         step(BAD, 32'h80);

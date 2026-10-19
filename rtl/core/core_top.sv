@@ -11,10 +11,15 @@
 //     software writes it with CSRW; MODE=0 -> Bare (PA = VA), MODE=1 -> Sv32
 //     translation with the root table at PPN<<12. Every committed satp write
 //     flushes the whole TLB (no ASIDs; there is no SFENCE.VMA instruction yet).
-//     The core only implements M-mode, and the MMU never translates in M-mode,
-//     so the priv_mode port gives the effective privilege for data accesses
-//     (bring-up / test hook): tie 2'b11 -> always Bare; 2'b01 (S) -> satp
-//     decides. With USE_MMU=0 satp is still a read/write CSR but has no effect.
+//     Privilege modes M/S/U live in priv_unit (cur_priv, exported). The MMU
+//     uses the effective data-access privilege: cur_priv, or mstatus.MPP when
+//     cur_priv == M and mstatus.MPRV == 1. M is never translated; S/U are
+//     translated when satp.MODE = Sv32, with the PTE U-bit check (U-mode only
+//     U=1 pages; S-mode not U=1 pages unless mstatus.SUM) and mstatus.MXR.
+//     priv_mode port (bring-up / test override, kept for older tests):
+//     2'b11 -> use the architectural effective privilege (normal operation);
+//     2'b00 / 2'b01 -> force U / S for data accesses regardless of cur_priv.
+//     With USE_MMU=0 satp is still a read/write CSR but has no effect.
 //     MMU faults raise a precise synchronous
 //     exception through priv_unit (xcpt_*): mcause = load/store page fault
 //     13/15 (or access fault 5/7), mtval = faulting VA, mepc = pc of the
@@ -46,8 +51,9 @@ module core_top #(
     output logic [3:0]  dmem_wstrb,
     input  logic [31:0] dmem_rdata,
     input  logic        meip, mtip, msip,
-    input  logic [1:0]  priv_mode,     // data-access privilege for the MMU (tie 2'b11)
-    output logic        mmu_fault
+    input  logic [1:0]  priv_mode,     // 2'b11 = architectural; U/S = forced MMU privilege
+    output logic        mmu_fault,
+    output logic [1:0]  cur_priv       // current privilege mode (00 U, 01 S, 11 M)
 );
     localparam logic [31:0] NOP = 32'h0000_0013;
 
@@ -178,6 +184,8 @@ module core_top #(
     assign mmu_xcpt_cause = {28'b0, mmu_cause};
     logic [31:0] csr_satp;     // satp CSR -> MMU
     logic        csr_satp_wr;  // satp write committed -> TLB flush
+    logic [1:0]  st_mpp;       // mstatus fields for the MMU
+    logic        st_mprv, st_sum, st_mxr;
     // Present each instruction once, on its first EX cycle (before any
     // multi-cycle MUL / DIV / load starts), so a trap can cleanly squash it.
     assign ex_first = valid_ex && !mul_wait && !div_wait && !lsu_busy;
@@ -191,7 +199,14 @@ module core_top #(
         .rd_we(p_rd_we), .rd_wdata(p_rd_wdata),
         .redirect(p_redirect), .redirect_pc(p_redirect_pc),
         .trap(p_trap), .irq_taken(p_irq), .mret(p_mret), .cause_o(p_cause),
-        .satp_o(csr_satp), .satp_wr_o(csr_satp_wr));
+        .satp_o(csr_satp), .satp_wr_o(csr_satp_wr),
+        .cur_priv(cur_priv), .mstatus_mpp(st_mpp), .mstatus_mprv(st_mprv),
+        .mstatus_sum(st_sum), .mstatus_mxr(st_mxr));
+
+    // Effective privilege for data accesses (MPRV: loads/stores use MPP in M)
+    logic [1:0] eff_priv, mmu_priv;
+    assign eff_priv = (cur_priv == 2'b11 && st_mprv) ? st_mpp : cur_priv;
+    assign mmu_priv = (priv_mode != 2'b11) ? priv_mode : eff_priv;
 
     logic br_flush;
     assign br_flush    = valid_ex && !p_trap && (bu_taken || jalr_ex);
@@ -313,7 +328,7 @@ module core_top #(
     generate if (USE_MMU) begin : g_mmu
         sv32_mmu #(.TLB_ENTRIES(4)) u_mmu (
             .clk, .rst_n,
-            .satp(csr_satp), .priv(priv_mode), .sum(1'b0), .mxr(1'b0), .flush(csr_satp_wr),
+            .satp(csr_satp), .priv(mmu_priv), .sum(st_sum), .mxr(st_mxr), .flush(csr_satp_wr),
             .req_valid(mmu_req_valid), .req_ready(mmu_req_ready),
             .req_vaddr(vaddr), .req_acc(mem_write_ex ? 2'd1 : 2'd0),
             .resp_valid(mmu_resp_valid), .resp_ready(lsu_st == L_XLATE),

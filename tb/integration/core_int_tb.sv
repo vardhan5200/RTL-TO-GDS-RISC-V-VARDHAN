@@ -51,7 +51,7 @@ module core_int_tb;
         chk("x7 lw (D$ hit, wr-upd)",  x(7), 43);
         chk("x9 lbu",                  x(9), 32'h0000_00AB);
         chk("x10 lb",                  x(10), 32'hFFFF_FFAB);
-        chk("x12 csrr misa",           x(12), 32'h4000_1100);
+        chk("x12 csrr misa (I,M,S,U)",  x(12), 32'h4014_1100);
         chk("x13 csrr mscratch",       x(13), 6);
         chk("x14 after ecall/mret",    x(14), 1);
         chk("x21 exception count",     x(21), 2);

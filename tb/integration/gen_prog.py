@@ -61,7 +61,7 @@ at(0,
    lb(10, 5, 9),                 # 13: 0xFFFFFFAB
    addi(11, 0, HANDLER),         # 14
    csrrw(0, MTVEC, 11),          # 15
-   csrrs(12, MISA, 0),           # 16: 0x40001100
+   csrrs(12, MISA, 0),           # 16: 0x40141100 (RV32 I M S U)
    csrrw(0, MSCRATCH, 1),        # 17
    csrrs(13, MSCRATCH, 0),       # 18: 6
    ECALL,                        # 19: trap cause 11
