@@ -44,14 +44,18 @@ module dm_cache (
                     req_ready <= 0;
                 end
             end else begin
-                refill_word = cnt - 1;
+                // refill_word is driven combinationally from cnt (below), so the
+                // word written here matches the mem_addr that produced mem_rdata.
                 data[miss_addr[9:4]][refill_word] <= mem_rdata;
                 if (cnt == 4) begin
                     valid[miss_addr[9:4]] <= 1;
                     tag[miss_addr[9:4]]   <= miss_addr[31:10];
                     cnt <= 0;
                     req_ready <= 1;
-                    resp_rdata <= data[miss_addr[9:4]][miss_addr[3:2]];
+                    // Last beat (word 3) is still being written this cycle:
+                    // forward it from mem_rdata instead of the stale array.
+                    resp_rdata <= (miss_addr[3:2] == 2'd3) ? mem_rdata
+                                : data[miss_addr[9:4]][miss_addr[3:2]];
                     resp_valid <= 1;
                 end else
                     cnt <= cnt + 1;
@@ -59,6 +63,7 @@ module dm_cache (
         end
     end
 
+    assign refill_word = cnt[1:0] - 2'd1;  // cnt 1..4 -> word 0..3
     assign mem_re   = (cnt != 0);
     assign mem_addr = {miss_addr[31:4], refill_word, 2'b00};
 endmodule
