@@ -2,6 +2,14 @@
 
 Open-source RV32I processor development: architecture → RTL → verification → physical design (SkyWater 130 nm).
 
+## Current Goal
+
+A single-core core capable of running a minimal nginx-style benchmark (tiny bare-metal HTTP server or equivalent request-loop microbenchmark). Full nginx/Linux is out of scope; a measurable request-per-second style workload on the core is the target.
+
+**Already working (integrated on `integrate/core-v1`):** 5-stage pipeline with MUL, L1 D-cache, basic M-mode privileged support (CSRs/traps), and a simple SoC.
+
+**Remaining gaps:** DIV in the pipeline, I-cache, page-fault traps, and `satp` (MMU enable/translation control).
+
 ## Current status
 
 | Component | Status | Notes |
