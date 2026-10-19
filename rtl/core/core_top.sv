@@ -165,6 +165,11 @@ module core_top #(
     logic        p_rd_we, p_redirect, p_trap, p_irq, p_mret;
     logic [31:0] p_rd_wdata, p_redirect_pc, p_cause;
     logic        mmu_xcpt;     // MMU fault on the EX load/store (defined in the LSU)
+    // Declared here (before priv_unit uses them); driven in the LSU section below.
+    logic [31:0] vaddr;        // load/store virtual address
+    logic [3:0]  mmu_cause;    // MMU fault cause (12/13/15, 1/5/7)
+    logic [31:0] mmu_xcpt_cause;
+    assign mmu_xcpt_cause = {28'b0, mmu_cause};
     // Present each instruction once, on its first EX cycle (before any
     // multi-cycle MUL / DIV / load starts), so a trap can cleanly squash it.
     assign ex_first = valid_ex && !mul_wait && !div_wait && !lsu_busy;
@@ -174,7 +179,7 @@ module core_top #(
         .instr((is_mul_ex || is_div_ex) ? NOP : instr_ex),   // decoder doesn't know M ops
         .pc(pc_ex), .rs1_data(rd1_ex),
         .mtip, .msip, .meip,
-        .xcpt_valid(mmu_xcpt), .xcpt_cause({28'b0, mmu_cause}), .xcpt_tval(vaddr),
+        .xcpt_valid(mmu_xcpt), .xcpt_cause(mmu_xcpt_cause), .xcpt_tval(vaddr),
         .rd_we(p_rd_we), .rd_wdata(p_rd_wdata),
         .redirect(p_redirect), .redirect_pc(p_redirect_pc),
         .trap(p_trap), .irq_taken(p_irq), .mret(p_mret), .cause_o(p_cause));
@@ -211,7 +216,7 @@ module core_top #(
     // ---- load/store unit (optional MMU -> D-cache / uncached bus) ----
     localparam logic [1:0] L_IDLE = 2'd0, L_XLATE = 2'd1, L_ACC = 2'd2, L_CWAIT = 2'd3;
     logic [1:0]  lsu_st;
-    logic [31:0] vaddr, paddr, paddr_q, load_word, load_data, st_wdata;
+    logic [31:0] paddr, paddr_q, load_word, load_data, st_wdata;
     logic [3:0]  st_strb;
     logic        mem_op, lsu_go, lsu_done, cacheable, acc_now;
     assign lsu_busy = (lsu_st != L_IDLE);
@@ -221,7 +226,6 @@ module core_top #(
     // MMU
     logic        mmu_req_valid, mmu_req_ready, mmu_resp_valid, mmu_pf, mmu_af;
     logic [33:0] mmu_paddr;
-    logic [3:0]  mmu_cause;
     logic        ptw_req_valid, ptw_req_ready, ptw_resp_valid, ptw_resp_ready;
     logic [33:0] ptw_addr;
     logic        ptw_pend;     // PTW read outstanding on the shared bus
