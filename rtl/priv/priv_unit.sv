@@ -1,4 +1,4 @@
-// priv_unit.sv — standalone machine-mode trap/CSR unit.
+// priv_unit.sv — standalone trap/CSR unit (M/S/U privilege modes, traps to M).
 `timescale 1ns/1ps
 //
 // Sits beside a pipeline at the commit point: present one instruction per
@@ -8,7 +8,9 @@
 //       illegal instruction (cause 2, mtval = instr)  — via rtl/cpu/decoder
 //         plus SYSTEM-opcode decode / CSR legality
 //       breakpoint EBREAK   (cause 3, mtval = pc)
-//       ecall from M-mode   (cause 11, mtval = 0)
+//       ecall               (cause 8 from U, 9 from S, 11 from M; mtval = 0)
+//       privilege violations (cause 2, mtval = instr): CSR with
+//         csr_addr[9:8] > cur_priv, MRET below M
 //       external synchronous exception (xcpt_valid/xcpt_cause/xcpt_tval),
 //         e.g. an MMU page fault (12/13/15) or access fault (1/5/7) that the
 //         pipeline detects after the instruction was presented (multi-cycle
@@ -16,14 +18,20 @@
 //         pc must still be the faulting instruction's pc (-> mepc). It has
 //         the highest priority (the faulting instruction is the oldest one).
 //   * takes interrupts at an instruction boundary (before instr executes),
-//     when mstatus.MIE && (mie & mip) != 0. Priority MEI(11) > MSI(3) > MTI(7).
+//     when (mie & mip) != 0 and M interrupts are globally enabled:
+//     mstatus.MIE in M-mode, always in S/U (cur_priv < M). Priority
+//     MEI(11) > MSI(3) > MTI(7).
 //     mepc = pc of the not-yet-executed instruction, mcause = {1, code}.
-//   * MRET: redirect to mepc, MIE <= MPIE, MPIE <= 1.
+//   * all traps enter M-mode: MPP <= cur_priv, cur_priv <= M (no delegation).
+//   * MRET (M-mode only): redirect to mepc, cur_priv <= MPP, MPP <= U,
+//     MIE <= MPIE, MPIE <= 1.
+//   * exports cur_priv and the mstatus MPP/MPRV/SUM/MXR bits so the core can
+//     compute the effective privilege for MMU data accesses.
 //   * exports the Sv32 satp CSR (0x180, in csr_file) as satp_o, and
 //     satp_wr_o = a satp write committed this cycle (the core flushes the TLB).
 // redirect/redirect_pc tell the pipeline to flush younger instructions and
 // refetch from redirect_pc (mtvec base, or base + 4*code in vectored mode).
-// It is not yet wired into pipeline_cpu.sv (integration is a follow-up).
+// Integrated at the commit point of rtl/core/core_top.sv.
 module priv_unit #(
     parameter logic [31:0] HART_ID = 32'd0
 ) (
@@ -46,7 +54,10 @@ module priv_unit #(
     output logic        mret,
     output logic [31:0] cause_o,
     output logic [31:0] satp_o,         // satp CSR value (MODE[31], PPN[21:0])
-    output logic        satp_wr_o       // satp written this cycle
+    output logic        satp_wr_o,      // satp written this cycle
+    output logic [1:0]  cur_priv,       // current privilege: 00 U, 01 S, 11 M
+    output logic [1:0]  mstatus_mpp,
+    output logic        mstatus_mprv, mstatus_sum, mstatus_mxr
 );
     // ---- base-ISA legality from the existing decoder (unmodified) ----
     logic dec_illegal;
@@ -85,13 +96,15 @@ module priv_unit #(
         .mret_take(mret), .instret_inc(instr_valid && !trap_take),
         .mtip, .msip, .meip,
         .mtvec_o(mtvec), .mepc_o(mepc), .mstatus_mie_o(gie), .mie_o(mie_v), .mip_o(mip_v),
-        .satp_o(satp_o), .satp_wr_o(satp_wr_o));
+        .satp_o(satp_o), .satp_wr_o(satp_wr_o),
+        .cur_priv_o(cur_priv), .mpp_o(mstatus_mpp),
+        .mprv_o(mstatus_mprv), .sum_o(mstatus_sum), .mxr_o(mstatus_mxr));
 
     // ---- interrupt selection ----
     wire [31:0] pend = mie_v & mip_v;
     logic irq_pend; logic [4:0] irq_code;
     always @(*) begin
-        irq_pend = gie && (pend[11] || pend[3] || pend[7]);
+        irq_pend = (gie || cur_priv != 2'b11) && (pend[11] || pend[3] || pend[7]);
         if      (pend[11]) irq_code = 5'd11;
         else if (pend[3])  irq_code = 5'd3;
         else               irq_code = 5'd7;
@@ -99,7 +112,8 @@ module priv_unit #(
 
     // ---- exception selection ----
     wire illegal = (is_system ? !(is_csr || is_ecall || is_ebreak || is_mret || is_wfi)
-                              : dec_illegal) || (is_csr && csr_illegal);
+                              : dec_illegal) || (is_csr && csr_illegal) ||
+                   (is_mret && cur_priv != 2'b11);
 
     always @(*) begin
         irq_taken  = instr_valid && irq_pend && !xcpt_valid;
@@ -113,7 +127,7 @@ module priv_unit #(
         end else if (instr_valid && is_ebreak) begin
             trap_take = 1'b1; trap_cause = 32'd3;  trap_tval = pc;
         end else if (instr_valid && is_ecall) begin
-            trap_take = 1'b1; trap_cause = 32'd11;
+            trap_take = 1'b1; trap_cause = {28'd0, 2'b10, cur_priv}; // 8 U / 9 S / 11 M
         end
         trap    = trap_take;
         cause_o = trap_cause;
