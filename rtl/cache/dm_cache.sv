@@ -9,7 +9,13 @@ module dm_cache (
     output logic [31:0] resp_rdata,
     output logic        mem_re,
     output logic [31:0] mem_addr,
-    input  logic [31:0] mem_rdata
+    input  logic [31:0] mem_rdata,
+    // Optional write-through update port (store hit updates the cached word;
+    // misses do not allocate). Defaults keep existing `.*` testbenches valid.
+    input  logic        wr_en    = 1'b0,
+    input  logic [31:0] wr_addr  = 32'h0,
+    input  logic [31:0] wr_wdata = 32'h0,
+    input  logic [3:0]  wr_strb  = 4'h0
 );
     logic [31:0] data [0:63][0:3];
     logic [21:0] tag  [0:63];
@@ -33,6 +39,12 @@ module dm_cache (
             word = req_addr[3:2];
             hit  = valid[idx] && (tag[idx] == req_addr[31:10]);
             resp_valid <= 0;
+
+            if (cnt == 0 && wr_en && valid[wr_addr[9:4]] &&
+                tag[wr_addr[9:4]] == wr_addr[31:10]) begin
+                for (int b = 0; b < 4; b++)
+                    if (wr_strb[b]) data[wr_addr[9:4]][wr_addr[3:2]][8*b +: 8] <= wr_wdata[8*b +: 8];
+            end
 
             if (cnt == 0) begin
                 if (req_valid && hit) begin
