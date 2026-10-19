@@ -1,4 +1,5 @@
-// pipeline_cpu.sv — known-working version (no forwarding)
+// pipeline_cpu.sv — 5-stage, EX/MEM + MEM/WB forwarding (forward_unit) and
+// WB->ID regfile bypass. No branches or load-use stall yet.
 module pipeline_cpu (
     input  logic        clk, rst_n,
     output logic [31:0] imem_addr,
@@ -18,9 +19,10 @@ module pipeline_cpu (
                    .pc_in(pc), .instr_in(imem_rdata),
                    .pc_out(pc_id), .instr_out(instr_id));
 
-    logic [4:0] rd_id  = instr_id[11:7];
-    logic [4:0] rs1_id = instr_id[19:15];
-    logic [4:0] rs2_id = instr_id[24:20];
+    logic [4:0] rd_id, rs1_id, rs2_id;   // continuous (were one-time initializers)
+    assign rd_id  = instr_id[11:7];
+    assign rs1_id = instr_id[19:15];
+    assign rs2_id = instr_id[24:20];
 
     logic illegal, alu_src_b_id, mem_read_id, mem_write_id, mem_unsigned_id;
     logic reg_write_id, branch_id, jump_id, jalr_id;
@@ -35,8 +37,13 @@ module pipeline_cpu (
     logic [31:0] imm_id, rd1_id, rd2_id, wb_data;
     logic [4:0] rd_wb; logic reg_write_wb;
     imm_gen u_imm (.instr(instr_id), .imm_sel, .imm(imm_id));
+    logic [31:0] rf_rd1, rf_rd2;
     regfile u_rf (.clk, .rst_n, .we(reg_write_wb), .rs1(rs1_id), .rs2(rs2_id),
-                  .rd(rd_wb), .wd(wb_data), .rd1(rd1_id), .rd2(rd2_id));
+                  .rd(rd_wb), .wd(wb_data), .rd1(rf_rd1), .rd2(rf_rd2));
+    // WB->ID bypass: regfile writes at the clock edge, so an instruction in ID
+    // during the writer's WB cycle would otherwise read the stale value.
+    assign rd1_id = (reg_write_wb && rd_wb != 0 && rd_wb == rs1_id) ? wb_data : rf_rd1;
+    assign rd2_id = (reg_write_wb && rd_wb != 0 && rd_wb == rs2_id) ? wb_data : rf_rd2;
 
     logic [31:0] pc_ex, rd1_ex, rd2_ex, imm_ex;
     logic [4:0] rs1_ex, rs2_ex, rd_ex;
@@ -63,24 +70,35 @@ module pipeline_cpu (
                    .wb_sel_out(wb_sel_ex), .mem_size_out(mem_size_ex),
                    .mem_unsigned_out(mem_unsigned_ex));
 
-    logic [31:0] alu_a, alu_b, alu_y;
+    logic [31:0] alu_a, alu_b, alu_y, fwd_b;
     logic zero;
+    logic [1:0] forward_a, forward_b;
+    logic [31:0] alu_y_mem;
+    logic [4:0] rd_mem;
+    logic reg_write_mem;
+    forward_unit u_fwd (.rs1_ex, .rs2_ex, .rd_mem, .rd_wb,
+                        .reg_write_mem, .reg_write_wb, .forward_a, .forward_b);
     always @(*) begin
-        alu_a = rd1_ex;
-        if (alu_src_b_ex)
-            alu_b = imm_ex;
-        else
-            alu_b = rd2_ex;
+        case (forward_a)
+            2'b01:   alu_a = alu_y_mem;
+            2'b10:   alu_a = wb_data;
+            default: alu_a = rd1_ex;
+        endcase
+        case (forward_b)
+            2'b01:   fwd_b = alu_y_mem;
+            2'b10:   fwd_b = wb_data;
+            default: fwd_b = rd2_ex;
+        endcase
+        alu_b = alu_src_b_ex ? imm_ex : fwd_b;
     end
     alu u_alu (.a(alu_a), .b(alu_b), .op(alu_op_ex), .y(alu_y), .zero);
 
-    logic [31:0] alu_y_mem, rd2_mem, pc_mem;
-    logic [4:0] rd_mem;
-    logic mem_read_mem, mem_write_mem, reg_write_mem;
+    logic [31:0] rd2_mem, pc_mem;
+    logic mem_read_mem, mem_write_mem;
     logic [1:0] wb_sel_mem; logic [2:0] mem_size_mem;
 
     ex_mem u_ex_mem (.clk, .rst_n,
-                     .alu_y_in(alu_y), .rd2_in(rd2_ex), .pc_in(pc_ex), .rd_in(rd_ex),
+                     .alu_y_in(alu_y), .rd2_in(fwd_b), .pc_in(pc_ex), .rd_in(rd_ex),
                      .mem_read_in(mem_read_ex), .mem_write_in(mem_write_ex),
                      .reg_write_in(reg_write_ex), .wb_sel_in(wb_sel_ex),
                      .mem_size_in(mem_size_ex),
