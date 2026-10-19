@@ -25,11 +25,21 @@ test-unit:
 test-pipeline:
 	bash tb/pipeline/run_pipeline_tests.sh
 
+CORE_RTL := rtl/cpu/decoder.sv rtl/cpu/imm_gen.sv rtl/cpu/alu.sv rtl/cpu/branch_unit.sv rtl/cpu/mul.sv \
+            rtl/cpu/div.sv rtl/cpu/div_unit.sv rtl/cache/dm_cache.sv rtl/cache/icache.sv \
+            rtl/priv/csr_file.sv rtl/priv/priv_unit.sv rtl/mmu/*.sv rtl/core/core_top.sv
 test-cache:
 	@mkdir -p $(SIM_OUT); $(IV) -s dm_cache_refill_tb -o $(SIM_OUT)/dm_cache_refill.vvp \
 	  rtl/cache/dm_cache.sv tb/cache/dm_cache_refill_tb.sv && \
 	  vvp -n $(SIM_OUT)/dm_cache_refill.vvp | tee $(SIM_OUT)/dm_cache_refill.log | grep SUMMARY && \
 	  grep -q "ALL PASS" $(SIM_OUT)/dm_cache_refill.log
+	@$(IV) -s icache_tb -o $(SIM_OUT)/icache_tb.vvp rtl/cache/icache.sv tb/cache/icache_tb.sv && \
+	  vvp -n $(SIM_OUT)/icache_tb.vvp | tee $(SIM_OUT)/icache_tb.log | grep SUMMARY && \
+	  grep -q "ALL PASS" $(SIM_OUT)/icache_tb.log
+	@for ic in 1 0; do $(IV) -s core_icache_tb -P core_icache_tb.USE_ICACHE=$$ic -o $(SIM_OUT)/core_icache$$ic.vvp \
+	  $(CORE_RTL) tb/cache/core_icache_tb.sv 2>/dev/null && \
+	  vvp -n $(SIM_OUT)/core_icache$$ic.vvp | tee $(SIM_OUT)/core_icache$$ic.log | grep -E "^core I|SUMMARY" && \
+	  grep -q "ALL PASS" $(SIM_OUT)/core_icache$$ic.log || exit 1; done
 
 test-priv:
 	bash tb/priv/run.sh | grep -E "^PRIV"

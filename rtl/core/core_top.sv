@@ -19,7 +19,14 @@
 //     rtl/cpu/div.sv) in EX: one start pulse, IF/ID/EX stall until done, the
 //     result is written back and forwarded to ID on the done cycle.
 //     DIV latency: 33 cycles in EX (32 iterations + start), i.e. 32 stall cycles.
-// The instruction side fetches combinationally from imem (no I-cache / I-MMU).
+// Instruction side: USE_ICACHE=1 (default) puts a small direct-mapped L1
+// I-cache (rtl/cache/icache.sv, ICACHE_LINES x 16 B) between the PC and the
+// imem port; refills read imem one word per cycle. On a miss the PC holds and
+// a bubble enters ID (the back end keeps draining); a redirect during a miss
+// still updates the PC and the stale line is never delivered for the new PC.
+// Fetch is physical (no I-MMU): the D-side MMU does not translate fetches, so
+// the I-cache is PIPT by construction (and small enough for VIPT later).
+// USE_ICACHE=0 restores the old combinational imem fetch.
 // Data bus: one combinational-read port shared by the cache refill, the MMU
 // walker and uncached/stores (all serialized by EX stalls).
 `timescale 1ns/1ps
@@ -27,7 +34,9 @@
 module core_top #(
     parameter logic [31:0] CACHE_BASE  = 32'h0000_0000,
     parameter logic [31:0] CACHE_LIMIT = 32'h0000_0200,
-    parameter bit          USE_MMU     = 1'b0
+    parameter bit          USE_MMU     = 1'b0,
+    parameter bit          USE_ICACHE  = 1'b1,
+    parameter int          ICACHE_LINES = 8
 ) (
     input  logic        clk, rst_n,
     output logic [31:0] imem_addr,
@@ -49,17 +58,36 @@ module core_top #(
     logic [31:0] pc, next_pc, redirect_pc;
 
     // ---------------- IF ----------------
+    // if_valid=0: I-cache miss -> PC holds (unless redirected) and IF/ID gets a bubble.
+    logic        if_valid;
+    logic [31:0] if_instr;
     always_ff @(posedge clk or negedge rst_n)
-        if (!rst_n)      pc <= 32'h0;
-        else if (!stall) pc <= next_pc;
-    assign imem_addr = pc;
+        if (!rst_n)                             pc <= 32'h0;
+        else if (!stall && (if_valid || flush)) pc <= next_pc;
+
+    generate if (USE_ICACHE) begin : g_icache
+        logic        ic_mem_re, ic_busy;
+        logic [31:0] ic_mem_addr;
+        icache #(.NLINES(ICACHE_LINES)) u_icache (
+            .clk, .rst_n,
+            .fetch_req(!flush),          // don't start a refill for a squashed PC
+            .fetch_addr(pc), .fetch_valid(if_valid), .fetch_rdata(if_instr),
+            .busy(ic_busy), .inval(1'b0),
+            .mem_re(ic_mem_re), .mem_addr(ic_mem_addr), .mem_rdata(imem_rdata));
+        assign imem_addr = ic_mem_re ? ic_mem_addr : pc;
+    end else begin : g_noicache
+        assign if_valid  = 1'b1;
+        assign if_instr  = imem_rdata;
+        assign imem_addr = pc;
+    end endgenerate
 
     logic [31:0] instr_id, pc_id;
     logic        bubble_id;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n)      begin instr_id <= NOP; pc_id <= 32'h0; bubble_id <= 1; end
         else if (flush)  begin instr_id <= NOP; pc_id <= 32'h0; bubble_id <= 1; end
-        else if (!stall) begin instr_id <= imem_rdata; pc_id <= pc; bubble_id <= 0; end
+        else if (!stall && if_valid) begin instr_id <= if_instr; pc_id <= pc; bubble_id <= 0; end
+        else if (!stall) begin instr_id <= NOP; pc_id <= pc; bubble_id <= 1; end  // I$ miss bubble
     end
 
     // ---------------- ID ----------------
