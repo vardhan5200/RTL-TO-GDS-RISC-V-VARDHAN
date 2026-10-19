@@ -1,7 +1,11 @@
-// csr_file.sv — RV32 machine-mode CSR file (M-mode only, no S/U).
+// csr_file.sv — RV32 machine-mode CSR file (M-mode only, no S/U) + Sv32 satp.
 `timescale 1ns/1ps
 //
 // Implemented CSRs:
+//   0x180 satp     Sv32: MODE[31], ASID[30:22] (WARL, hardwired 0), PPN[21:0].
+//                  Reset 0 (Bare). Exported as satp_o for the MMU; satp_wr_o
+//                  pulses on the cycle a write commits (used as a TLB flush).
+//                  Accessible from M-mode (the only mode implemented).
 //   0x300 mstatus  MIE[3], MPIE[7], MPP[12:11] (hardwired 2'b11 = M)
 //   0x301 misa     read-only RV32I + M (0x40001100); writes ignored (WARL)
 //   0x304 mie      MSIE[3], MTIE[7], MEIE[11]
@@ -48,7 +52,9 @@ module csr_file #(
     output logic [31:0] mepc_o,
     output logic        mstatus_mie_o,
     output logic [31:0] mie_o,
-    output logic [31:0] mip_o
+    output logic [31:0] mip_o,
+    output logic [31:0] satp_o,        // Sv32 satp (MODE/ASID/PPN) for the MMU
+    output logic        satp_wr_o      // satp written this cycle (TLB flush)
 );
     localparam logic [31:0] MISA_VAL = 32'h4000_1100; // MXL=1, I, M
 
@@ -60,12 +66,16 @@ module csr_file #(
     assign mstatus_v = {19'b0, 2'b11, 3'b0, mpie_bit, 3'b0, mie_bit, 3'b0};
     assign mip_v     = {20'b0, meip, 3'b0, mtip, 3'b0, msip, 3'b0};
     localparam logic [31:0] MIE_MASK = 32'h0000_0888;
+    // satp WARL mask: MODE[31] + PPN[21:0] writable, ASID[30:22] reads 0
+    localparam logic [31:0] SATP_MASK = 32'h803F_FFFF;
+    logic [31:0] satp_r;
 
     // ---- read mux ----
     logic known;
     always @(*) begin
         known = 1'b1;
         case (csr_addr)
+            12'h180: csr_rdata = satp_r;
             12'h300: csr_rdata = mstatus_v;
             12'h301: csr_rdata = MISA_VAL;
             12'h304: csr_rdata = mie_r;
@@ -108,6 +118,7 @@ module csr_file #(
             mie_bit <= 1'b0; mpie_bit <= 1'b0;
             mie_r <= 0; mtvec_r <= 0; mscratch_r <= 0; mepc_r <= 0;
             mcause_r <= 0; mtval_r <= 0; mcycle_r <= 0; minstret_r <= 0;
+            satp_r <= 32'b0;
         end else begin
             mcycle_r <= mcycle_r + 64'd1;
             if (instret_inc) minstret_r <= minstret_r + 64'd1;
@@ -123,6 +134,7 @@ module csr_file #(
                 mpie_bit <= 1'b1;
             end else if (wr) begin
                 case (csr_addr)
+                    12'h180: satp_r     <= wval & SATP_MASK;
                     12'h300: begin mie_bit <= wval[3]; mpie_bit <= wval[7]; end
                     12'h304: mie_r      <= wval & MIE_MASK;
                     12'h305: mtvec_r    <= {wval[31:2], 1'b0, wval[0]};
@@ -145,4 +157,7 @@ module csr_file #(
     assign mstatus_mie_o = mie_bit;
     assign mie_o         = mie_r;
     assign mip_o         = mip_v;
+    assign satp_o        = satp_r;
+    // Same condition as the satp_r update above (a trap/mret suppresses it).
+    assign satp_wr_o     = wr && !trap_take && !mret_take && (csr_addr == 12'h180);
 endmodule

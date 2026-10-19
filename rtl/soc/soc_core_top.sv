@@ -30,7 +30,7 @@ module soc_core_top #(
         .imem_addr, .imem_rdata,
         .dmem_re, .dmem_we, .dmem_addr, .dmem_wdata, .dmem_wstrb, .dmem_rdata,
         .meip(irq), .mtip(1'b0), .msip(1'b0),
-        .satp(32'h0), .priv_mode(2'b11), .mmu_fault
+        .priv_mode(2'b11), .mmu_fault
     );
 
     logic [31:0] rom  [0:63];

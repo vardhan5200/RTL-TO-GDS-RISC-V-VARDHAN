@@ -1,4 +1,4 @@
-// core_top.sv — integrated RV32I(+MUL) core: pipeline_branch-style 3-stage
+// core_top.sv — integrated RV32I(+MUL/DIV/DIVU/REM/REMU) core: pipeline_branch-style 3-stage
 // pipeline (IF / ID / EX+MEM+WB) with
 //   * L1 D-cache (rtl/cache/dm_cache.sv) for loads in [CACHE_BASE, CACHE_LIMIT);
 //     stores are write-through (bus write + cache word update on hit, no
@@ -6,11 +6,26 @@
 //   * M-mode CSR/trap unit (rtl/priv/priv_unit.sv) at the commit point (EX):
 //     CSR ops, ECALL/EBREAK/illegal traps, MRET, machine interrupts
 //     (meip/mtip/msip inputs, e.g. meip from the SoC irq_ctrl).
-//   * optional Sv32 MMU (rtl/mmu/sv32_mmu.sv) on the data side, USE_MMU=1.
-//     satp/priv come from ports (csr_file has no satp / S/U modes yet), so in
-//     M-mode the MMU is a passthrough. MMU faults are NOT yet routed into
-//     priv_unit (it has no external-exception input); they squash the access
-//     and raise mmu_fault.
+//   * optional Sv32 MMU (rtl/mmu/sv32_mmu.sv) on the data side, USE_MMU=1
+//     (hardware present). satp comes from the satp CSR (0x180, csr_file):
+//     software writes it with CSRW; MODE=0 -> Bare (PA = VA), MODE=1 -> Sv32
+//     translation with the root table at PPN<<12. Every committed satp write
+//     flushes the whole TLB (no ASIDs; there is no SFENCE.VMA instruction yet).
+//     The core only implements M-mode, and the MMU never translates in M-mode,
+//     so the priv_mode port gives the effective privilege for data accesses
+//     (bring-up / test hook): tie 2'b11 -> always Bare; 2'b01 (S) -> satp
+//     decides. With USE_MMU=0 satp is still a read/write CSR but has no effect.
+//     MMU faults raise a precise synchronous
+//     exception through priv_unit (xcpt_*): mcause = load/store page fault
+//     13/15 (or access fault 5/7), mtval = faulting VA, mepc = pc of the
+//     load/store. The access is squashed (no rd write, store never reaches the
+//     bus/cache), younger instructions are flushed and fetch jumps to mtvec.
+//     mmu_fault stays as a sticky status flag. (No I-side MMU, so instruction
+//     page faults (12) cannot occur yet.)
+//   * MUL (rtl/cpu/mul.sv) and DIV/DIVU/REM/REMU (rtl/cpu/div_unit.sv around
+//     rtl/cpu/div.sv) in EX: one start pulse, IF/ID/EX stall until done, the
+//     result is written back and forwarded to ID on the done cycle.
+//     DIV latency: 33 cycles in EX (32 iterations + start), i.e. 32 stall cycles.
 // The instruction side fetches combinationally from imem (no I-cache / I-MMU).
 // Data bus: one combinational-read port shared by the cache refill, the MMU
 // walker and uncached/stores (all serialized by EX stalls).
@@ -31,8 +46,7 @@ module core_top #(
     output logic [3:0]  dmem_wstrb,
     input  logic [31:0] dmem_rdata,
     input  logic        meip, mtip, msip,
-    input  logic [31:0] satp,          // MMU only (tie 0)
-    input  logic [1:0]  priv_mode,     // MMU only (tie 2'b11)
+    input  logic [1:0]  priv_mode,     // data-access privilege for the MMU (tie 2'b11)
     output logic        mmu_fault
 );
     localparam logic [31:0] NOP = 32'h0000_0013;
@@ -79,12 +93,15 @@ module core_top #(
     logic [31:0] imm_id;
     imm_gen u_imm (.instr(instr_id), .imm_sel(imm_sel_id), .imm(imm_id));
 
-    logic is_mul_id, ok_id, valid_id;
+    logic is_mul_id, is_div_id, ok_id, valid_id;
     assign is_mul_id = (opcode_id == 7'b0110011) && (instr_id[31:25] == 7'h01) &&
                        (funct3_id == 3'b000);
+    // DIV/DIVU/REM/REMU: funct7=0000001, funct3=1xx
+    assign is_div_id = (opcode_id == 7'b0110011) && (instr_id[31:25] == 7'h01) &&
+                       funct3_id[2];
     // Every real instruction goes to EX; priv_unit traps illegal ones there.
     assign valid_id = !bubble_id;
-    assign ok_id    = !illegal_id || is_mul_id;   // side effects allowed
+    assign ok_id    = !illegal_id || is_mul_id || is_div_id;   // side effects allowed
 
     logic [31:0] regs [0:31];
     logic        ex_wen;
@@ -100,7 +117,7 @@ module core_top #(
     end
 
     // ---------------- ID/EX ----------------
-    logic        valid_ex, reg_write_ex, alu_src_b_ex, branch_ex, jump_ex, jalr_ex, is_mul_ex;
+    logic        valid_ex, reg_write_ex, alu_src_b_ex, branch_ex, jump_ex, jalr_ex, is_mul_ex, is_div_ex;
     logic        mem_read_ex, mem_write_ex;
     logic [31:0] pc_ex, rd1_ex, rd2_ex, imm_ex, instr_ex;
     logic [3:0]  alu_op_ex;
@@ -110,18 +127,19 @@ module core_top #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n || flush) begin
             valid_ex <= 0; reg_write_ex <= 0; alu_src_b_ex <= 0;
-            branch_ex <= 0; jump_ex <= 0; jalr_ex <= 0; is_mul_ex <= 0;
+            branch_ex <= 0; jump_ex <= 0; jalr_ex <= 0; is_mul_ex <= 0; is_div_ex <= 0;
             mem_read_ex <= 0; mem_write_ex <= 0; instr_ex <= NOP;
             pc_ex <= 0; rd1_ex <= 0; rd2_ex <= 0; imm_ex <= 0;
             alu_op_ex <= 0; funct3_ex <= 0; opcode_ex <= 0; wb_sel_ex <= 0; rd_ex <= 0;
         end else if (!stall) begin
             valid_ex     <= valid_id;
-            reg_write_ex <= (reg_write_id || is_mul_id) && ok_id && valid_id;
+            reg_write_ex <= (reg_write_id || is_mul_id || is_div_id) && ok_id && valid_id;
             alu_src_b_ex <= alu_src_b_id;
             branch_ex    <= branch_id && ok_id && valid_id;
             jump_ex      <= jump_id && ok_id && valid_id;
             jalr_ex      <= jalr_id && ok_id && valid_id;
             is_mul_ex    <= is_mul_id && valid_id;
+            is_div_ex    <= is_div_id && valid_id;
             mem_read_ex  <= mem_read_id && ok_id && valid_id;
             mem_write_ex <= mem_write_id && ok_id && valid_id;
             instr_ex     <= instr_id;
@@ -149,21 +167,31 @@ module core_top #(
                       .pc(pc_ex), .imm(imm_ex), .taken(bu_taken), .target(bu_target));
 
     // ---- privileged unit at the commit point ----
-    logic        mul_wait, lsu_busy, ex_first;
+    logic        mul_wait, div_wait, lsu_busy, ex_first;
     logic        p_rd_we, p_redirect, p_trap, p_irq, p_mret;
     logic [31:0] p_rd_wdata, p_redirect_pc, p_cause;
+    logic        mmu_xcpt;     // MMU fault on the EX load/store (defined in the LSU)
+    // Declared here (before priv_unit uses them); driven in the LSU section below.
+    logic [31:0] vaddr;        // load/store virtual address
+    logic [3:0]  mmu_cause;    // MMU fault cause (12/13/15, 1/5/7)
+    logic [31:0] mmu_xcpt_cause;
+    assign mmu_xcpt_cause = {28'b0, mmu_cause};
+    logic [31:0] csr_satp;     // satp CSR -> MMU
+    logic        csr_satp_wr;  // satp write committed -> TLB flush
     // Present each instruction once, on its first EX cycle (before any
-    // multi-cycle MUL / load starts), so a trap can cleanly squash it.
-    assign ex_first = valid_ex && !mul_wait && !lsu_busy;
+    // multi-cycle MUL / DIV / load starts), so a trap can cleanly squash it.
+    assign ex_first = valid_ex && !mul_wait && !div_wait && !lsu_busy;
     priv_unit u_priv (
         .clk, .rst_n,
         .instr_valid(ex_first),
-        .instr(is_mul_ex ? NOP : instr_ex),   // decoder doesn't know MUL
+        .instr((is_mul_ex || is_div_ex) ? NOP : instr_ex),   // decoder doesn't know M ops
         .pc(pc_ex), .rs1_data(rd1_ex),
         .mtip, .msip, .meip,
+        .xcpt_valid(mmu_xcpt), .xcpt_cause(mmu_xcpt_cause), .xcpt_tval(vaddr),
         .rd_we(p_rd_we), .rd_wdata(p_rd_wdata),
         .redirect(p_redirect), .redirect_pc(p_redirect_pc),
-        .trap(p_trap), .irq_taken(p_irq), .mret(p_mret), .cause_o(p_cause));
+        .trap(p_trap), .irq_taken(p_irq), .mret(p_mret), .cause_o(p_cause),
+        .satp_o(csr_satp), .satp_wr_o(csr_satp_wr));
 
     logic br_flush;
     assign br_flush    = valid_ex && !p_trap && (bu_taken || jalr_ex);
@@ -183,20 +211,30 @@ module core_top #(
         else if (mul_start) mul_wait <= 1;
         else if (mul_done)  mul_wait <= 0;
 
+    // ---- divider (DIV/DIVU/REM/REMU), same handshake as the multiplier ----
+    logic div_start, div_done;
+    logic [31:0] div_result;
+    assign div_start = valid_ex && is_div_ex && !div_wait && !p_trap;
+    div_unit u_div (.clk, .rst_n, .start(div_start), .op(funct3_ex[1:0]),
+                    .a(rd1_ex), .b(rd2_ex), .result(div_result), .done(div_done));
+    always_ff @(posedge clk or negedge rst_n)
+        if (!rst_n)         div_wait <= 0;
+        else if (div_start) div_wait <= 1;
+        else if (div_done)  div_wait <= 0;
+
     // ---- load/store unit (optional MMU -> D-cache / uncached bus) ----
     localparam logic [1:0] L_IDLE = 2'd0, L_XLATE = 2'd1, L_ACC = 2'd2, L_CWAIT = 2'd3;
     logic [1:0]  lsu_st;
-    logic [31:0] vaddr, paddr, paddr_q, load_word, load_data, st_wdata;
+    logic [31:0] paddr, paddr_q, load_word, load_data, st_wdata;
     logic [3:0]  st_strb;
     logic        mem_op, lsu_go, lsu_done, cacheable, acc_now;
     assign lsu_busy = (lsu_st != L_IDLE);
     assign mem_op   = valid_ex && (mem_read_ex || mem_write_ex) && !p_trap;
-    assign vaddr    = alu_y;
+    assign vaddr    = alu_y;     // ID/EX is held while the LSU is busy -> stable
 
     // MMU
     logic        mmu_req_valid, mmu_req_ready, mmu_resp_valid, mmu_pf, mmu_af;
     logic [33:0] mmu_paddr;
-    logic [3:0]  mmu_cause;
     logic        ptw_req_valid, ptw_req_ready, ptw_resp_valid, ptw_resp_ready;
     logic [33:0] ptw_addr;
     logic        ptw_pend;     // PTW read outstanding on the shared bus
@@ -231,8 +269,11 @@ module core_top #(
         load_word = dmem_rdata;
         if (st_now || ld_unc_now) lsu_done = 1'b1;
         if (lsu_st == L_CWAIT && dc_resp_valid) begin lsu_done = 1'b1; load_word = dc_resp_rdata; end
-        if (lsu_st == L_XLATE && mmu_resp_valid && (mmu_pf || mmu_af)) lsu_done = 1'b1; // squashed
+        if (mmu_xcpt) lsu_done = 1'b1; // squashed, trap taken
     end
+    // Translation fault -> precise exception (cause from the MMU's access type)
+    assign mmu_xcpt = USE_MMU && valid_ex && (mem_read_ex || mem_write_ex) &&
+                      (lsu_st == L_XLATE) && mmu_resp_valid && (mmu_pf || mmu_af);
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin lsu_st <= L_IDLE; paddr_q <= 0; mmu_fault <= 0; end
@@ -272,7 +313,7 @@ module core_top #(
     generate if (USE_MMU) begin : g_mmu
         sv32_mmu #(.TLB_ENTRIES(4)) u_mmu (
             .clk, .rst_n,
-            .satp, .priv(priv_mode), .sum(1'b0), .mxr(1'b0), .flush(1'b0),
+            .satp(csr_satp), .priv(priv_mode), .sum(1'b0), .mxr(1'b0), .flush(csr_satp_wr),
             .req_valid(mmu_req_valid), .req_ready(mmu_req_ready),
             .req_vaddr(vaddr), .req_acc(mem_write_ex ? 2'd1 : 2'd0),
             .resp_valid(mmu_resp_valid), .resp_ready(lsu_st == L_XLATE),
@@ -312,10 +353,12 @@ module core_top #(
     end
 
     // ---- stall / writeback ----
-    assign stall = !p_trap && ((valid_ex && is_mul_ex && !mul_done) || (mem_op && !lsu_done));
+    assign stall = !p_trap && ((valid_ex && is_mul_ex && !mul_done) ||
+                               (valid_ex && is_div_ex && !div_done) || (mem_op && !lsu_done));
 
     always_comb begin
         if (is_mul_ex)            ex_result = mul_result;
+        else if (is_div_ex)       ex_result = div_result;
         else if (mem_read_ex)     ex_result = load_data;
         else if (p_rd_we)         ex_result = p_rd_wdata;
         else if (wb_sel_ex == 2)  ex_result = pc_ex + 32'd4;
@@ -323,7 +366,7 @@ module core_top #(
     end
 
     logic squash_ld;
-    assign squash_ld = (lsu_st == L_XLATE) && mmu_resp_valid && (mmu_pf || mmu_af);
+    assign squash_ld = mmu_xcpt;
     assign ex_wen = valid_ex && !stall && !p_trap && !squash_ld && (rd_ex != 0) &&
                     (reg_write_ex || p_rd_we);
     assign retire = valid_ex && !stall && !p_trap;

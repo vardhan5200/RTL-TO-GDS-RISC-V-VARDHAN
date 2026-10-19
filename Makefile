@@ -14,6 +14,7 @@ test: test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integr
 # Pre-existing self-checking unit / single-cycle / legacy SoC benches
 UNIT := alu_tb:tb/unit/alu_tb.sv dec_tb:tb/unit/dec_tb.sv decoder_tb:tb/unit/decoder_tb.sv \
         imm_gen_tb:tb/unit/imm_gen_tb.sv mul_tb:tb/unit/mul_tb.sv div_tb:tb/unit/div_tb.sv \
+        div_unit_tb:tb/unit/div_unit_tb.sv \
         sc_full_tb:tb/cpu/sc_full_tb.sv soc:soc.sv soc_min:soc_min.sv soc_timer:soc_timer.sv
 test-unit:
 	@mkdir -p $(SIM_OUT); fail=0; for e in $(UNIT); do t=$${e%%:*}; f=$${e#*:}; \
