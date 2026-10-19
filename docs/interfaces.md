@@ -4,6 +4,8 @@
 **Protocol:** Ready/valid handshake  
 **Date:** 2026-10-19
 
+> **Implementation status (checkpoint `ba15d11`):** These interfaces are the target and are not implemented yet. Today `dm_cache.sv` uses `req_valid`/`req_ready`/`req_addr`/`resp_valid`/`resp_rdata` on the CPU side, but it has no `resp_ready`, write path, or error signal. On the memory side it uses a simple 32-bit word-per-cycle refill (`mem_re`, `mem_addr`, `mem_rdata`) with no ready/valid handshake. The CPUs use plain combinational `imem_*`/`dmem_*` ports. The current RTL uses active-low asynchronous reset (`rst_n`, `negedge rst_n`). See [`status.md`](status.md).
+
 ## 1. Ready/valid handshake
 
 A request is accepted only when both `valid` and `ready` are high on the sampling clock edge.

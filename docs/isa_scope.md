@@ -5,6 +5,8 @@
 **Privilege:** Machine mode only (initial)  
 **Date:** 2026-10-19
 
+> **Implementation status (checkpoint `ba15d11`):** The single-cycle CPU decodes all RV32I base instructions. Loads and stores are word-only (`dmem_wstrb` is fixed to `4'b1111`, with no byte select or sign extension on loads). ECALL, EBREAK, and FENCE are decoded as no-ops. No CSRs or traps are implemented. M extension work has started ahead of the plan in §2: standalone `rtl/cpu/mul.sv` (unsigned shift-and-add, low 32 bits) and `rtl/cpu/div.sv` (repeated subtraction, small unsigned values only) pass their unit tests, but they are not yet connected into a CPU (`tb_pipe_m` fails). See [`status.md`](status.md).
+
 ## 1. Supported instruction classes
 
 All base RV32I instructions are in scope for the final CPU. Implementation order is staged.
@@ -40,7 +42,7 @@ Branch conditions are evaluated by a dedicated branch unit, not by testing wheth
 
 | Extension / Feature       | Status                                      |
 |---------------------------|---------------------------------------------|
-| M (multiply/divide)       | Add after base RV32I passes tests           |
+| M (multiply/divide)       | In progress: standalone mul/div units exist; pipeline integration open |
 | A (atomics)               | Not in first version                        |
 | F / D (floating point)    | Not in first version                        |
 | C (compressed)            | Not in first version                        |

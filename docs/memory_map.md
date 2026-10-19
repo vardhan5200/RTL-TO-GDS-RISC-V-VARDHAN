@@ -4,6 +4,15 @@
 **Reset PC:** `0x0000_0000`  
 **Date:** 2026-10-19
 
+> **Implementation status (checkpoint `ba15d11`):** The map below is the target and is not implemented yet. The test SoCs use small ad-hoc maps instead:
+>
+> - `soc.sv`: ROM 0x000–0x0FF (64 words), SRAM 0x100–0x1FF, UART TX 0x200, GPIO out 0x204, done flag 0x208.
+> - `soc_min.sv`: UART TX 0x200, done flag 0x204.
+> - `soc_timer.sv`: UART 0x00, done 0x08, timer COUNT 0x0C (read), timer COMPARE 0x10 (write). No interrupt output.
+> - `bench.sv`: done flag 0x08.
+>
+> None of the test SoCs implement UART STATUS/CONTROL, GPIO IN/DIR, or timer CONTROL. See [`status.md`](status.md).
+
 ## 1. Address regions
 
 | Address range              | Block                     | Size   | Access     | Notes                                      |

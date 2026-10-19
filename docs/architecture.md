@@ -6,6 +6,8 @@
 **Process:** SkyWater SKY130 (via OpenROAD Flow Scripts)  
 **Date:** 2026-10-19
 
+> **Implementation status (checkpoint `ba15d11`):** This document describes the target design. Today the repo has a working single-cycle RV32I CPU and a minimal 5-stage pipeline (`pipe_min.sv`, ADDI/ADD/SW/LW with forwarding). Branch/loop handling in the pipeline is still in progress. The L1 cache (`rtl/cache/dm_cache.sv`) is a standalone read-only direct-mapped model with a known refill data-path bug, and it is not connected to the CPU. There is no interconnect, arbiter, Boot ROM, or interrupt support yet. The test SoCs (`soc.sv`, `soc_min.sv`, `soc_timer.sv`) wire memory directly to the single-cycle CPU. See [`status.md`](status.md).
+
 ## 1. Block diagram
 
 ```
