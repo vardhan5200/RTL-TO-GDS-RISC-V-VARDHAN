@@ -12,10 +12,13 @@ module priv_unit_tb;
     logic        mtip = 0, msip = 0, meip = 0;
     logic        rd_we, redirect, trap, irq_taken, mret;
     logic [31:0] rd_wdata, redirect_pc, cause_o;
+    logic [31:0] satp_o;
+    logic        satp_wr;
 
     priv_unit dut (.clk, .rst_n, .instr_valid, .instr, .pc, .rs1_data,
                    .mtip, .msip, .meip, .rd_we, .rd_wdata, .redirect, .redirect_pc,
-                   .trap, .irq_taken, .mret, .cause_o);
+                   .trap, .irq_taken, .mret, .cause_o,
+                   .satp_o, .satp_wr_o(satp_wr));
 
     integer pass = 0, fail = 0;
     task automatic check(input string name, input logic [31:0] got, input logic [31:0] exp);
@@ -33,6 +36,7 @@ module priv_unit_tb;
 
     // captured outputs of the last step
     logic s_rd_we, s_redirect, s_trap, s_irq, s_mret; logic [31:0] s_rdata, s_rpc, s_cause;
+    logic s_satp_wr;
 
     // present one instruction for one cycle, sample combinational outputs, commit at edge
     task automatic step(input [31:0] i, input [31:0] p, input [31:0] r1 = 0);
@@ -40,6 +44,7 @@ module priv_unit_tb;
         #1;
         s_rd_we = rd_we; s_rdata = rd_wdata; s_redirect = redirect; s_rpc = redirect_pc;
         s_trap = trap; s_irq = irq_taken; s_mret = mret; s_cause = cause_o;
+        s_satp_wr = satp_wr;
         @(posedge clk); #1;
         instr_valid = 0; instr = NOP;
     endtask
@@ -175,6 +180,21 @@ module priv_unit_tb;
         mtip = 0;
         step(MRET, 32'h11C);
         step(NOP, 32'h308); check("quiet", s_trap, 0);
+
+        // ---------- satp (0x180, Sv32: MODE[31], ASID[30:22]=0 WARL, PPN[21:0]) ----------
+        rdcsr(12'h180, v); check("satp reset", v, 32'h0); check("satp read no trap", s_trap, 0);
+        check("satp_o reset", satp_o, 32'h0); check("satp read: no write pulse", s_satp_wr, 0);
+        step(csr_i(RW, 5'd1, 5'd1, 12'h180), 32'h400, 32'hFFFF_FFFF);
+        check("csrrw satp old", s_rdata, 32'h0); check("satp write pulse", s_satp_wr, 1);
+        rdcsr(12'h180, v); check("satp WARL (ASID=0)", v, 32'h803F_FFFF);
+        check("satp_o", satp_o, 32'h803F_FFFF);
+        step(csr_i(RC, 5'd0, 5'd1, 12'h180), 32'h404, 32'h8000_0000);   // clear MODE
+        rdcsr(12'h180, v); check("satp csrrc MODE", v, 32'h003F_FFFF);
+        step(csr_i(RW, 5'd0, 5'd1, 12'h180), 32'h408, 32'h8000_0002);
+        rdcsr(12'h180, v); check("satp Sv32 root PPN 2", v, 32'h8000_0002);
+        step(csr_i(RWI, 5'd0, 5'd0, 12'h180), 32'h40C);                 // csrwi satp, 0
+        check("csrwi satp pulse", s_satp_wr, 1);
+        rdcsr(12'h180, v); check("satp csrwi 0", v, 32'h0);
 
         $display("PRIV TESTS: %0d passed, %0d failed", pass, fail);
         if (fail == 0) $display("PRIV: PASSED"); else $display("PRIV: FAILED");

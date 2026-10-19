@@ -19,6 +19,8 @@
 //     when mstatus.MIE && (mie & mip) != 0. Priority MEI(11) > MSI(3) > MTI(7).
 //     mepc = pc of the not-yet-executed instruction, mcause = {1, code}.
 //   * MRET: redirect to mepc, MIE <= MPIE, MPIE <= 1.
+//   * exports the Sv32 satp CSR (0x180, in csr_file) as satp_o, and
+//     satp_wr_o = a satp write committed this cycle (the core flushes the TLB).
 // redirect/redirect_pc tell the pipeline to flush younger instructions and
 // refetch from redirect_pc (mtvec base, or base + 4*code in vectored mode).
 // It is not yet wired into pipeline_cpu.sv (integration is a follow-up).
@@ -42,7 +44,9 @@ module priv_unit #(
     output logic        trap,           // exception or interrupt taken
     output logic        irq_taken,
     output logic        mret,
-    output logic [31:0] cause_o
+    output logic [31:0] cause_o,
+    output logic [31:0] satp_o,         // satp CSR value (MODE[31], PPN[21:0])
+    output logic        satp_wr_o       // satp written this cycle
 );
     // ---- base-ISA legality from the existing decoder (unmodified) ----
     logic dec_illegal;
@@ -80,7 +84,8 @@ module priv_unit #(
         .trap_take, .trap_cause, .trap_epc(pc), .trap_tval,
         .mret_take(mret), .instret_inc(instr_valid && !trap_take),
         .mtip, .msip, .meip,
-        .mtvec_o(mtvec), .mepc_o(mepc), .mstatus_mie_o(gie), .mie_o(mie_v), .mip_o(mip_v));
+        .mtvec_o(mtvec), .mepc_o(mepc), .mstatus_mie_o(gie), .mie_o(mie_v), .mip_o(mip_v),
+        .satp_o(satp_o), .satp_wr_o(satp_wr_o));
 
     // ---- interrupt selection ----
     wire [31:0] pend = mie_v & mip_v;

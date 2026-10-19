@@ -1,6 +1,7 @@
-// core_pf_tb.sv — MMU page-fault traps on core_top (USE_MMU=1, D-side Sv32 via
-// the satp/priv_mode bring-up ports). The program (gen_prog.py, core_pf_prog.hex)
-// does a faulting load (unmapped megapage), a faulting store (read-only page)
+// core_pf_tb.sv — MMU page-fault traps on core_top (USE_MMU=1, D-side Sv32).
+// The program (gen_prog.py, core_pf_prog.hex) first enables Sv32 with
+// CSRW satp = 0x80000002 (root PA 0x2000); priv_mode=S from the tb port lets
+// the MMU translate (the core itself is M-only). It then does a faulting load (unmapped megapage), a faulting store (read-only page)
 // and a faulting lb after a two-level walk (invalid L0 PTE). The M-mode
 // handler logs {mcause, mtval, mepc} to memory, advances mepc by 4 and MRETs.
 // Checks: causes 13/15/13, mtval = faulting VA, mepc = faulting pc, rd not
@@ -15,7 +16,7 @@ module core_pf_tb;
     logic [31:0] mem [0:4095];
     localparam logic [31:0] SENT = 32'hDEAD_BEEF;
     // fault pcs printed by gen_prog.py
-    localparam logic [31:0] PC_LD = 32'h2C, PC_ST = 32'h34, PC_LD2 = 32'h40;
+    localparam logic [31:0] PC_LD = 32'h38, PC_ST = 32'h40, PC_LD2 = 32'h4C;
     initial begin
         for (int k = 0; k < 4096; k++) mem[k] = 32'h0;
         $readmemh("tb/integration/core_pf_prog.hex", mem, 0, 127);
@@ -40,7 +41,7 @@ module core_pf_tb;
         .clk, .rst_n, .imem_addr, .imem_rdata,
         .dmem_re, .dmem_we, .dmem_addr, .dmem_wdata, .dmem_wstrb, .dmem_rdata,
         .meip(1'b0), .mtip(1'b0), .msip(1'b0),
-        .satp(32'h8000_0002), .priv_mode(2'b01), .mmu_fault);
+        .priv_mode(2'b01), .mmu_fault);
 
     // trace every trap taken by the core
     always @(posedge clk)

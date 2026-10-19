@@ -6,9 +6,16 @@
 //   * M-mode CSR/trap unit (rtl/priv/priv_unit.sv) at the commit point (EX):
 //     CSR ops, ECALL/EBREAK/illegal traps, MRET, machine interrupts
 //     (meip/mtip/msip inputs, e.g. meip from the SoC irq_ctrl).
-//   * optional Sv32 MMU (rtl/mmu/sv32_mmu.sv) on the data side, USE_MMU=1.
-//     satp/priv come from ports (csr_file has no satp / S/U modes yet), so in
-//     M-mode the MMU is a passthrough. MMU faults raise a precise synchronous
+//   * optional Sv32 MMU (rtl/mmu/sv32_mmu.sv) on the data side, USE_MMU=1
+//     (hardware present). satp comes from the satp CSR (0x180, csr_file):
+//     software writes it with CSRW; MODE=0 -> Bare (PA = VA), MODE=1 -> Sv32
+//     translation with the root table at PPN<<12. Every committed satp write
+//     flushes the whole TLB (no ASIDs; there is no SFENCE.VMA instruction yet).
+//     The core only implements M-mode, and the MMU never translates in M-mode,
+//     so the priv_mode port gives the effective privilege for data accesses
+//     (bring-up / test hook): tie 2'b11 -> always Bare; 2'b01 (S) -> satp
+//     decides. With USE_MMU=0 satp is still a read/write CSR but has no effect.
+//     MMU faults raise a precise synchronous
 //     exception through priv_unit (xcpt_*): mcause = load/store page fault
 //     13/15 (or access fault 5/7), mtval = faulting VA, mepc = pc of the
 //     load/store. The access is squashed (no rd write, store never reaches the
@@ -39,8 +46,7 @@ module core_top #(
     output logic [3:0]  dmem_wstrb,
     input  logic [31:0] dmem_rdata,
     input  logic        meip, mtip, msip,
-    input  logic [31:0] satp,          // MMU only (tie 0)
-    input  logic [1:0]  priv_mode,     // MMU only (tie 2'b11)
+    input  logic [1:0]  priv_mode,     // data-access privilege for the MMU (tie 2'b11)
     output logic        mmu_fault
 );
     localparam logic [31:0] NOP = 32'h0000_0013;
@@ -170,6 +176,8 @@ module core_top #(
     logic [3:0]  mmu_cause;    // MMU fault cause (12/13/15, 1/5/7)
     logic [31:0] mmu_xcpt_cause;
     assign mmu_xcpt_cause = {28'b0, mmu_cause};
+    logic [31:0] csr_satp;     // satp CSR -> MMU
+    logic        csr_satp_wr;  // satp write committed -> TLB flush
     // Present each instruction once, on its first EX cycle (before any
     // multi-cycle MUL / DIV / load starts), so a trap can cleanly squash it.
     assign ex_first = valid_ex && !mul_wait && !div_wait && !lsu_busy;
@@ -182,7 +190,8 @@ module core_top #(
         .xcpt_valid(mmu_xcpt), .xcpt_cause(mmu_xcpt_cause), .xcpt_tval(vaddr),
         .rd_we(p_rd_we), .rd_wdata(p_rd_wdata),
         .redirect(p_redirect), .redirect_pc(p_redirect_pc),
-        .trap(p_trap), .irq_taken(p_irq), .mret(p_mret), .cause_o(p_cause));
+        .trap(p_trap), .irq_taken(p_irq), .mret(p_mret), .cause_o(p_cause),
+        .satp_o(csr_satp), .satp_wr_o(csr_satp_wr));
 
     logic br_flush;
     assign br_flush    = valid_ex && !p_trap && (bu_taken || jalr_ex);
@@ -304,7 +313,7 @@ module core_top #(
     generate if (USE_MMU) begin : g_mmu
         sv32_mmu #(.TLB_ENTRIES(4)) u_mmu (
             .clk, .rst_n,
-            .satp, .priv(priv_mode), .sum(1'b0), .mxr(1'b0), .flush(1'b0),
+            .satp(csr_satp), .priv(priv_mode), .sum(1'b0), .mxr(1'b0), .flush(csr_satp_wr),
             .req_valid(mmu_req_valid), .req_ready(mmu_req_ready),
             .req_vaddr(vaddr), .req_acc(mem_write_ex ? 2'd1 : 2'd0),
             .resp_valid(mmu_resp_valid), .resp_ready(lsu_st == L_XLATE),

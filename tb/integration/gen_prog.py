@@ -33,6 +33,12 @@ csrrs  = lambda rd, csr, rs1: i(csr, rs1, 2, rd, 0x73)
 csrrsi = lambda rd, csr, uimm: i(csr, uimm, 6, rd, 0x73)
 ECALL, MRET = 0x00000073, 0x30200073
 MSTATUS, MISA, MIE, MTVEC, MSCRATCH, MEPC, MCAUSE, MTVAL = 0x300, 0x301, 0x304, 0x305, 0x340, 0x341, 0x342, 0x343
+SATP = 0x180
+csrrc  = lambda rd, csr, rs1: i(csr, rs1, 3, rd, 0x73)
+def set_satp(tmp, val):
+    """lui/addi tmp = val; csrw satp, tmp (3 words; val[11] must be 0)."""
+    assert (val & 0x800) == 0
+    return [lui(tmp, val >> 12), addi(tmp, tmp, val & 0x7ff), csrrw(0, SATP, tmp)]
 
 HANDLER = 40 * 4
 prog = {}
@@ -103,7 +109,7 @@ print("wrote", out)
 # ---- D-side Sv32 translation test (core_mmu_tb.sv, flat memory) ----
 # VA 0x0040_0000 megapage -> PA 0x0 (root table at PA 0x2000); VA 0x0080_0000 unmapped.
 MMU_H = 32                        # handler word index
-mmu = [
+mmu = set_satp(11, 0x8000_0002) + [   # software enables Sv32, root PPN 2 (PA 0x2000)
     addi(8, 0, MMU_H * 4),
     csrrw(0, MTVEC, 8),           # page faults now trap -> handler skips the load
     lui(1, 0x400),                # x1 = 0x0040_0000
@@ -183,6 +189,7 @@ pf_pc = {}
 def P(w, tag=None):
     if tag: pf_pc[tag] = 4 * len(pf)
     pf.append(w)
+for w in set_satp(29, 0x8000_0002): P(w)      # software enables Sv32, root PA 0x2000
 P(addi(1, 0, PF_H * 4)); P(csrrw(0, MTVEC, 1))
 P(lui(31, 0x400)); P(addi(31, 31, 0x300))     # trap log pointer: VA 0x400300 (PA 0x300)
 P(lui(2, 0x400))                              # RW megapage
@@ -219,3 +226,65 @@ with open(out4, "w") as f:
     for k in range(128):
         f.write("%08x\n" % (pf[k] if k < len(pf) else 0x00000013))
 print("wrote", out4, "fault pcs:", {k: hex(v) for k, v in pf_pc.items()})
+
+# ---- satp CSR test (core_satp_tb.sv, flat 32 KiB memory, USE_MMU=1, priv_mode=S) ----
+# Root A at PA 0x2000 (satp 0x80000002): L1[0] -> L0 at PA 0x3000;
+#   L0[1]: VA 0x1000 -> PA 0x5000 (V|R|W|A|D), L0[4]: VA 0x4000 invalid.
+# Root B at PA 0x6000 (satp 0x80000006): L1[0] -> L0 at PA 0x7000;
+#   L0[1]: VA 0x1000 -> PA 0x4000.
+# Memory: PA 0x1000 = 0x11111111, PA 0x4000 = 0x44444444, PA 0x5000 = 0x55555555.
+# Results go to registers (checked by the tb); handler logs mcause/mtval.
+SATP_H = 96
+st = []
+st_pc = {}
+def T(w, tag=None):
+    if tag: st_pc[tag] = 4 * len(st)
+    st.append(w)
+T(addi(1, 0, SATP_H * 4)); T(csrrw(0, MTVEC, 1))
+T(lui(2, 0x1))                                # x2 = VA 0x1000
+T(lui(3, 0x4))                                # x3 = VA 0x4000
+T(addi(4, 0, 0xA1)); T(addi(5, 0, 0xB2))
+T(addi(19, 0, 0x5A5))                         # sentinel for the faulting load
+T(csrrs(6, SATP, 0))                          # x6 = satp after reset (0)
+# --- phase 1: satp = 0 -> Bare ---
+T(lw(7, 2, 0))                                # PA 0x1000 -> 0x11111111
+T(lw(8, 3, 0))                                # PA 0x4000 -> 0x44444444 (no fault)
+T(sw(4, 2, 4))                                # PA 0x1004 = 0xA1
+# --- phase 2: enable Sv32, root A ---
+for w in set_satp(9, 0x8000_0002): T(w)
+T(csrrs(10, SATP, 0))                         # x10 = 0x80000002
+T(addi(11, 0, -1)); T(csrrw(12, SATP, 11))    # x12 = old 0x80000002; write all-ones
+T(csrrs(13, SATP, 0))                         # x13 = 0x803FFFFF (ASID WARL 0)
+T(csrrc(0, SATP, 11)); T(csrrs(14, SATP, 0))  # CSRRC all -> x14 = 0
+T(csrrs(0, SATP, 9))                          # CSRRS -> satp = 0x80000002 again
+T(lw(15, 2, 0))                               # VA 0x1000 -> PA 0x5000: 0x55555555
+T(sw(5, 2, 4))                                # VA 0x1004 -> PA 0x5004 = 0xB2
+T(lw(16, 2, 4))                               # 0xB2 (TLB hit)
+T(lw(19, 3, 0), "pf")                         # VA 0x4000 unmapped -> page fault 13
+T(addi(17, 17, 1))                            # runs once after mret
+# --- phase 3: switch root (TLB must be flushed by the satp write) ---
+for w in set_satp(9, 0x8000_0006): T(w)
+T(lw(18, 2, 0))                               # VA 0x1000 -> PA 0x4000: 0x44444444
+# --- phase 4: satp = 0 -> Bare again ---
+T(csrrw(0, SATP, 0)); T(csrrs(20, SATP, 0))   # x20 = 0
+T(lw(21, 2, 0))                               # PA 0x1000: 0x11111111
+T(lw(22, 2, 4))                               # PA 0x1004: 0xA1
+T(lw(23, 3, 0))                               # PA 0x4000: 0x44444444, no fault
+T(lui(30, 0x5A7D)); T(addi(30, 30, 0x00D))    # signature 0x05A7D00D
+T(sw(30, 0, 0x3F0))                           # PA 0x3F0 = signature
+T(jal(0, 0))
+assert len(st) <= SATP_H
+st += [0x00000013] * (SATP_H - len(st))
+st += [
+    csrrs(25, MCAUSE, 0),
+    csrrs(26, MTVAL, 0),
+    csrrs(27, MEPC, 0),
+    addi(27, 27, 4), csrrw(0, MEPC, 27),      # skip the faulting load
+    addi(24, 24, 1),                          # trap count
+    MRET,
+]
+out5 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core_satp_prog.hex")
+with open(out5, "w") as f:
+    for k in range(128):
+        f.write("%08x\n" % (st[k] if k < len(st) else 0x00000013))
+print("wrote", out5, "fault pcs:", {k: hex(v) for k, v in st_pc.items()})

@@ -1,5 +1,6 @@
-// core_mmu_tb.sv — core_top with USE_MMU=1 and the D-side MMU enabled via the
-// satp/priv_mode bring-up ports (csr_file has no satp yet). Flat 16 KiB memory
+// core_mmu_tb.sv — core_top with USE_MMU=1; the program enables the D-side MMU
+// with CSRW satp = 0x80000002 (root PA 0x2000) and priv_mode=S comes from the
+// tb port (the core is M-only and M-mode is never translated). Flat 16 KiB memory
 // shared by fetch and data; page table walks go over the core's data bus.
 `timescale 1ns/1ps
 module core_mmu_tb;
@@ -25,7 +26,7 @@ module core_mmu_tb;
         .clk, .rst_n, .imem_addr, .imem_rdata,
         .dmem_re, .dmem_we, .dmem_addr, .dmem_wdata, .dmem_wstrb, .dmem_rdata,
         .meip(1'b0), .mtip(1'b0), .msip(1'b0),
-        .satp(32'h8000_0002), .priv_mode(2'b01), .mmu_fault);
+        .priv_mode(2'b01), .mmu_fault);
 
     int errors = 0;
     task automatic chk(string name, logic [31:0] got, logic [31:0] exp);
