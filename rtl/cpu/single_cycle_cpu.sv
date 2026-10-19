@@ -1,4 +1,4 @@
-// single_cycle_cpu.sv — explicit assigns, Icarus-safe
+// single_cycle_cpu.sv — based on the version that passed
 module single_cycle_cpu (
     input  logic        clk,
     input  logic        rst_n,
@@ -14,29 +14,35 @@ module single_cycle_cpu (
     pc u_pc (.clk(clk), .rst_n(rst_n), .stall(1'b0), .next_pc(next_pc), .pc_out(pc));
     assign imem_addr = pc;
 
-    // Explicit field extraction
     logic [6:0] opcode;
     logic [4:0] rd, rs1, rs2;
     logic [2:0] funct3;
-    logic [6:0] funct7;
-
     assign opcode = imem_rdata[6:0];
     assign rd     = imem_rdata[11:7];
     assign funct3 = imem_rdata[14:12];
     assign rs1    = imem_rdata[19:15];
     assign rs2    = imem_rdata[24:20];
-    assign funct7 = imem_rdata[31:25];
 
-    logic        illegal;
-    logic [3:0]  alu_op;
-    logic [2:0]  imm_sel;
-    logic        alu_src_b, mem_read, mem_write, reg_write, branch, jump;
-    logic [1:0]  wb_sel;
+    logic illegal, alu_src_b, mem_read, mem_write, mem_unsigned, reg_write, branch, jump, jalr;
+    logic [3:0] alu_op;
+    logic [2:0] imm_sel, mem_size;
+    logic [1:0] wb_sel;
 
     decoder u_dec (
-        .instr(imem_rdata), .illegal(illegal), .alu_op(alu_op), .imm_sel(imm_sel),
-        .alu_src_b(alu_src_b), .mem_read(mem_read), .mem_write(mem_write),
-        .reg_write(reg_write), .wb_sel(wb_sel), .branch(branch), .jump(jump)
+        .instr(imem_rdata),
+        .illegal(illegal),
+        .alu_op(alu_op),
+        .imm_sel(imm_sel),
+        .alu_src_b(alu_src_b),
+        .mem_read(mem_read),
+        .mem_write(mem_write),
+        .mem_size(mem_size),
+        .mem_unsigned(mem_unsigned),
+        .reg_write(reg_write),
+        .wb_sel(wb_sel),
+        .branch(branch),
+        .jump(jump),
+        .jalr(jalr)
     );
 
     logic [31:0] imm;
@@ -49,26 +55,25 @@ module single_cycle_cpu (
         .rd1(rd1), .rd2(rd2)
     );
 
-    logic [31:0] alu_b;
+    logic [31:0] alu_a, alu_b, alu_y;
+    logic zero;
+    assign alu_a = (opcode == 7'b0110111) ? 32'd0 : rd1;
     assign alu_b = alu_src_b ? imm : rd2;
-
-    logic [31:0] alu_y;
-    logic        alu_zero;
-    alu u_alu (.a(rd1), .b(alu_b), .op(alu_op), .y(alu_y), .zero(alu_zero));
+    alu u_alu (.a(alu_a), .b(alu_b), .op(alu_op), .y(alu_y), .zero(zero));
 
     logic taken;
-    logic [31:0] branch_target;
+    logic [31:0] btarget;
     branch_unit u_bu (
         .rs1(rd1), .rs2(rd2), .funct3(funct3),
-        .branch(branch), .jump(jump && (opcode != 7'b1100111)),
-        .pc(pc), .imm(imm), .taken(taken), .target(branch_target)
+        .branch(branch), .jump(jump && !jalr),
+        .pc(pc), .imm(imm), .taken(taken), .target(btarget)
     );
 
     always @(*) begin
-        if (jump && (opcode == 7'b1100111))
+        if (jalr)
             next_pc = (rd1 + imm) & ~32'h1;
         else if (taken)
-            next_pc = branch_target;
+            next_pc = btarget;
         else
             next_pc = pc + 32'd4;
     end
@@ -76,12 +81,15 @@ module single_cycle_cpu (
     assign dmem_we    = mem_write;
     assign dmem_addr  = alu_y;
     assign dmem_wdata = rd2;
-    assign dmem_wstrb = 4'b1111;
+    assign dmem_wstrb = 4'b1111;  // word only for this test
+
+    logic [31:0] load_data;
+    assign load_data = dmem_rdata;
 
     always @(*) begin
         case (wb_sel)
             2'd0: wb_data = alu_y;
-            2'd1: wb_data = dmem_rdata;
+            2'd1: wb_data = load_data;
             2'd2: wb_data = pc + 32'd4;
             default: wb_data = alu_y;
         endcase
