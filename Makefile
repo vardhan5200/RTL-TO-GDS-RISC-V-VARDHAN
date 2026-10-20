@@ -1,6 +1,6 @@
 # Regression entry points (Icarus Verilog, iverilog -g2012 + vvp).
 #   make test   - everything below
-#   make test-ppa-check - ALU equivalence + MUL random vectors (needs yosys too)
+#   test-ppa-check (ALU equivalence + MUL random vectors) also needs yosys.
 SIM_OUT ?= /tmp/riscv_sim
 IV      := iverilog -g2012
 export SIM_OUT
@@ -9,7 +9,7 @@ SHELL := /bin/bash
 
 .PHONY: test test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration test-ppa-check
 
-test: test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration
+test: test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration test-ppa-check
 	@echo "== make test: all suites passed"
 
 # Pre-existing self-checking unit / single-cycle / legacy SoC benches
