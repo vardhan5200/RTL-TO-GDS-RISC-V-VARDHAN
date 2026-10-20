@@ -305,8 +305,13 @@ module core_top #(
     logic div_start, div_done;
     logic [31:0] div_result;
     assign div_start = valid_ex && is_div_ex && !div_wait && !p_trap;
+    // Operand isolation: div_unit's input negators / zero check are
+    // combinational on a/b, so feed them zeros unless a DIV is in EX.
+    logic [31:0] div_a, div_b;
+    assign div_a = rd1_ex & {32{is_div_ex}};
+    assign div_b = rd2_ex & {32{is_div_ex}};
     div_unit u_div (.clk, .rst_n, .start(div_start), .op(funct3_ex[1:0]),
-                    .a(rd1_ex), .b(rd2_ex), .result(div_result), .done(div_done));
+                    .a(div_a), .b(div_b), .result(div_result), .done(div_done));
     always_ff @(posedge clk or negedge rst_n)
         if (!rst_n)         div_wait <= 0;
         else if (div_start) div_wait <= 1;
