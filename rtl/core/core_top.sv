@@ -33,7 +33,20 @@
 //     rtl/cpu/div.sv) in EX: one start pulse, IF/ID/EX stall until done, the
 //     result is written back and forwarded to ID on the done cycle.
 //     DIV latency: 33 cycles in EX (32 iterations + start), i.e. 32 stall cycles.
-// Instruction side: imem is read combinationally (no I-cache in this branch).
+// Instruction side: USE_ICACHE=1 (default) adds a direct-mapped L1 I-cache
+// (rtl/cache/icache.sv, ICACHE_LINES x 16 B, PIPT) AFTER fetch translation:
+// it is looked up with the physical fetch address (pc in Bare, else the
+// fetch translation register's PPN + page offset) and refills over the imem
+// port. Order per fetch: translate (I-TLB / walk, PC holds + bubble) ->
+// fault? deliver a fault NOP, no cache lookup/refill -> I-cache hit, or
+// miss + 4-beat refill (PC holds + bubble). Redirects: a pending translation
+// is dropped as before; an in-flight refill completes into a valid line but
+// is only ever returned for a matching current physical fetch address; no
+// refill is started for a PC being flushed. Physically tagged, so satp /
+// privilege changes need no I-cache maintenance. FENCE.I (fetched as FENCE
+// funct3=001) invalidates the I-cache and refetches pc+4 (the pipeline is
+// flushed like for a satp write). There is no SFENCE.VMA; satp writes flush
+// the TLBs. USE_ICACHE=0 restores the uncached combinational imem fetch.
 // With USE_MMU=1 fetch is translated by a second sv32_mmu instance (I-MMU,
 // own 4-entry I-TLB, req_acc=fetch) whenever satp.MODE=1 and priv_mode is not
 // M (same rule as the data side). A 1-entry fetch translation register (last
@@ -58,7 +71,9 @@
 module core_top #(
     parameter logic [31:0] CACHE_BASE  = 32'h0000_0000,
     parameter logic [31:0] CACHE_LIMIT = 32'h0000_0200,
-    parameter bit          USE_MMU     = 1'b0
+    parameter bit          USE_MMU     = 1'b0,
+    parameter bit          USE_ICACHE  = 1'b1,
+    parameter int          ICACHE_LINES = 8
 ) (
     input  logic        clk, rst_n,
     output logic [31:0] imem_addr,
@@ -101,14 +116,36 @@ module core_top #(
         if (!rst_n)                             pc <= 32'h0;
         else if (!stall && (if_valid || flush)) pc <= next_pc;
 
+    logic        if_xl_ok;     // translation for pc available (or Bare)
+    logic [31:0] if_pa;        // physical fetch address
+    logic        fencei_inval; // FENCE.I commit -> invalidate I-cache
     assign i_bare    = !USE_MMU || !csr_satp[31] || (priv_mode == 2'b11);
     assign ifx_hit   = ifx_valid && (ifx_vpn == pc[31:12]);
     assign if_paddr  = {ifx_ppn, pc[11:0]};
-    assign imem_addr = i_bare ? pc : if_paddr[31:0];
-    assign if_valid  = i_bare || ifx_hit;
+    assign if_pa     = i_bare ? pc : if_paddr[31:0];
+    assign if_xl_ok  = i_bare || ifx_hit;
     assign if_fault  = !i_bare && ifx_hit && ifx_fault;
     assign if_fcause = ifx_cause;
-    assign if_instr  = if_fault ? NOP : imem_rdata;
+
+    generate if (USE_ICACHE) begin : g_icache
+        logic        ic_valid, ic_mem_re, ic_busy;
+        logic [31:0] ic_rdata, ic_mem_addr;
+        // Lookup/refill only with a valid, non-faulting translation, and not
+        // for a PC that is being flushed this cycle.
+        icache #(.NLINES(ICACHE_LINES)) u_icache (
+            .clk, .rst_n,
+            .fetch_req(if_xl_ok && !if_fault && !flush),
+            .fetch_addr(if_pa), .fetch_valid(ic_valid), .fetch_rdata(ic_rdata),
+            .busy(ic_busy), .inval(fencei_inval),
+            .mem_re(ic_mem_re), .mem_addr(ic_mem_addr), .mem_rdata(imem_rdata));
+        assign imem_addr = ic_mem_re ? ic_mem_addr : if_pa;
+        assign if_valid  = if_xl_ok && (if_fault || ic_valid);
+        assign if_instr  = if_fault ? NOP : ic_rdata;
+    end else begin : g_noicache
+        assign imem_addr = if_pa;
+        assign if_valid  = if_xl_ok;
+        assign if_instr  = if_fault ? NOP : imem_rdata;
+    end endgenerate
 
     logic [31:0] instr_id, pc_id;
     logic        bubble_id, fault_id;
@@ -119,7 +156,7 @@ module core_top #(
         end else if (!stall && if_valid) begin
             instr_id <= if_instr; pc_id <= pc; bubble_id <= 0;
             fault_id <= if_fault; fcause_id <= if_fcause;
-        end else if (!stall) begin   // fetch translation pending: bubble
+        end else if (!stall) begin   // fetch translation / I-cache miss pending: bubble
             instr_id <= NOP; pc_id <= pc; bubble_id <= 1; fault_id <= 0; fcause_id <= 4'd0;
         end
     end
@@ -271,13 +308,18 @@ module core_top #(
     assign eff_priv = (cur_priv == 2'b11 && st_mprv) ? st_mpp : cur_priv;
     assign mmu_priv = (priv_mode != 2'b11) ? priv_mode : eff_priv;
 
-    logic br_flush, satp_flush;
+    logic br_flush, satp_flush, fencei_flush;
     assign br_flush    = valid_ex && !p_trap && (bu_taken || jalr_ex);
     // satp write: refetch the following instructions under the new translation
     assign satp_flush  = USE_MMU && csr_satp_wr && !p_trap;
-    assign flush       = p_redirect || br_flush || satp_flush;
+    // FENCE.I (opcode MISC-MEM, funct3 001): invalidate the I-cache and refetch
+    // the following instructions (already fetched ones may be stale).
+    assign fencei_flush = USE_ICACHE && ex_first && !fault_ex && !p_trap &&
+                          opcode_ex == 7'b0001111 && funct3_ex == 3'b001;
+    assign fencei_inval = fencei_flush;
+    assign flush       = p_redirect || br_flush || satp_flush || fencei_flush;
     assign redirect_pc = p_redirect ? p_redirect_pc :
-                         satp_flush ? (pc_ex + 32'd4) :
+                         (satp_flush || fencei_flush) ? (pc_ex + 32'd4) :
                          jalr_ex    ? ((rd1_ex + imm_ex) & ~32'h1) : bu_target;
     assign next_pc     = flush ? redirect_pc : pc + 32'd4;
 

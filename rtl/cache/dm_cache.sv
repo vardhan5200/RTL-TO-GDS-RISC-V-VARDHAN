@@ -35,9 +35,6 @@ module dm_cache (
             resp_valid <= 0;
             for (int i = 0; i < 64; i++) valid[i] <= 0;
         end else begin
-            idx  = req_addr[9:4];
-            word = req_addr[3:2];
-            hit  = valid[idx] && (tag[idx] == req_addr[31:10]);
             resp_valid <= 0;
 
             if (cnt == 0 && wr_en && valid[wr_addr[9:4]] &&
@@ -75,6 +72,11 @@ module dm_cache (
         end
     end
 
+    // Lookup is combinational (was blocking temps inside the always_ff, which
+    // left `hit` holding the previous edge's value for anything probing it).
+    assign idx  = req_addr[9:4];
+    assign word = req_addr[3:2];
+    assign hit  = valid[idx] && (tag[idx] == req_addr[31:10]);
     assign refill_word = cnt[1:0] - 2'd1;  // cnt 1..4 -> word 0..3
     assign mem_re   = (cnt != 0);
     assign mem_addr = {miss_addr[31:4], refill_word, 2'b00};
