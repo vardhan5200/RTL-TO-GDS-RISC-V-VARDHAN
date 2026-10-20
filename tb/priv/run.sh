@@ -3,6 +3,8 @@
 #   priv_unit_tb      : M-mode CSRs / traps / interrupts / satp (unit level)
 #   priv_modes_tb     : M/S/U privilege modes in priv_unit (unit level)
 #   core_priv_mmu_tb  : privilege modes + Sv32 MMU in core_top (M bypass, S/U translate)
+#   smode_tb          : S-mode CSRs, SRET, medeleg/mideleg trap delegation (unit level)
+#   core_smode_tb     : delegated / non-delegated traps in core_top (real program, MMU faults)
 # Usage: tb/priv/run.sh
 set -u
 cd "$(dirname "$0")/../.."
@@ -22,4 +24,6 @@ run() { local top=$1 pat=$2; shift 2
 run priv_unit_tb     "PRIV: PASSED"          $PRIV tb/priv/priv_unit_tb.sv
 run priv_modes_tb    "PRIV MODES: PASSED"    $PRIV tb/priv/priv_modes_tb.sv
 run core_priv_mmu_tb "CORE PRIV MMU: PASSED" $CORE tb/priv/core_priv_mmu_tb.sv
+run smode_tb         "SMODE: PASSED"         $PRIV tb/priv/smode_tb.sv
+run core_smode_tb    "CORE SMODE: PASSED"    $CORE tb/priv/core_smode_tb.sv
 [ $fail -eq 0 ] && echo "PRIV SUITE: ALL PASSED" || { echo "PRIV SUITE: FAILED"; exit 1; }

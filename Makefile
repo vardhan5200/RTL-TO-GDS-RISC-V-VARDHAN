@@ -32,7 +32,7 @@ test-cache:
 	  grep -q "ALL PASS" $(SIM_OUT)/dm_cache_refill.log
 
 test-priv:
-	bash tb/priv/run.sh | grep -E "^(CORE )?PRIV"
+	bash tb/priv/run.sh | grep -E "^(CORE )?(PRIV|SMODE)"
 
 test-mmu:
 	sh tb/mmu/run.sh | grep -E "^MMU: ALL TESTS PASSED"

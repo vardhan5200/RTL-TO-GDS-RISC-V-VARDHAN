@@ -3,9 +3,14 @@
 //   * L1 D-cache (rtl/cache/dm_cache.sv) for loads in [CACHE_BASE, CACHE_LIMIT);
 //     stores are write-through (bus write + cache word update on hit, no
 //     allocate). Other addresses (MMIO) bypass the cache.
-//   * M-mode CSR/trap unit (rtl/priv/priv_unit.sv) at the commit point (EX):
-//     CSR ops, ECALL/EBREAK/illegal traps, MRET, machine interrupts
-//     (meip/mtip/msip inputs, e.g. meip from the SoC irq_ctrl).
+//   * CSR/trap unit (rtl/priv/priv_unit.sv) at the commit point (EX):
+//     M/S/U modes, CSR ops, ECALL/EBREAK/illegal traps, MRET/SRET, machine
+//     interrupts (meip/mtip/msip inputs, e.g. meip from the SoC irq_ctrl) and
+//     software S interrupts. Trap routing (M vs S via medeleg/mideleg) is done
+//     inside priv_unit, so fetch and data MMU faults, which enter through the
+//     xcpt_* port, are delegated to S (stvec/scause/sepc/stval) exactly like
+//     other exceptions; the redirect (mtvec, stvec, mepc or sepc) arrives on
+//     p_redirect/p_redirect_pc and also clears the fetch translation register.
 //   * optional Sv32 MMUs (rtl/mmu/sv32_mmu.sv) on the data and fetch side, USE_MMU=1
 //     (hardware present). satp comes from the satp CSR (0x180, csr_file):
 //     software writes it with CSRW; MODE=0 -> Bare (PA = VA), MODE=1 -> Sv32
