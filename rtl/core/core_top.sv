@@ -204,16 +204,32 @@ module core_top #(
     assign valid_id = !bubble_id;
     assign ok_id    = !illegal_id || is_mul_id || is_div_id;   // side effects allowed
 
+    // PPA: EX-stage selects decoded here and registered (one-hot / single
+    // flops), so EX does not re-decode opcode_ex / wb_sel_ex on its critical
+    // operand, result and forwarding paths.
+    logic is_csr_id, a_zero_id, a_pc_id, link_id, wr_id;
+    assign is_csr_id = (opcode_id == 7'b1110011) && (funct3_id != 3'b000) && (funct3_id != 3'b100);
+    assign a_zero_id = (opcode_id == 7'b0110111);   // LUI:   ALU A = 0
+    assign a_pc_id   = (opcode_id == 7'b0010111);   // AUIPC: ALU A = pc
+    assign link_id   = (wb_sel_id == 2'd2);         // JAL/JALR: rd = pc + 4
+    // EX instruction may write rd (ALU/load/M/link or CSR read); rd != x0.
+    assign wr_id     = valid_id && (rd_id != 5'd0) &&
+                       (((reg_write_id || is_mul_id || is_div_id) && ok_id) || is_csr_id);
+
     logic [31:0] regs [1:31];   // x0 is hard-wired: no storage
-    logic        ex_wen;
+    logic        ex_wen, fwd_ex;
     logic [4:0]  rd_ex;
     logic [31:0] ex_result, rd1_id, rd2_id;
+    // EX->ID forwarding. The select uses only registered EX bits (wr_ex):
+    // whenever the EX instruction would not actually write (stall, trap, MMU
+    // squash) ID/EX is either held (stall) or flushed (trap), so the forwarded
+    // value is never captured and the late stall/p_trap terms are not needed.
     always_comb begin
         if (rs1_id == 0)                       rd1_id = 32'h0;
-        else if (ex_wen && rd_ex == rs1_id)    rd1_id = ex_result;
+        else if (fwd_ex && rd_ex == rs1_id)    rd1_id = ex_result;
         else                                   rd1_id = regs[rs1_id];
         if (rs2_id == 0)                       rd2_id = 32'h0;
-        else if (ex_wen && rd_ex == rs2_id)    rd2_id = ex_result;
+        else if (fwd_ex && rd_ex == rs2_id)    rd2_id = ex_result;
         else                                   rd2_id = regs[rs2_id];
     end
 
@@ -226,6 +242,7 @@ module core_top #(
     logic [2:0]  funct3_ex;
     logic [6:0]  opcode_ex;
     logic [1:0]  wb_sel_ex;
+    logic        is_csr_ex, a_zero_ex, a_pc_ex, link_ex, wr_ex, alu_res_ex;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             valid_ex <= 0; reg_write_ex <= 0; alu_src_b_ex <= 0;
@@ -233,14 +250,15 @@ module core_top #(
             mem_read_ex <= 0; mem_write_ex <= 0; instr_ex <= NOP;
             fault_ex <= 0; fcause_ex <= 4'd0;
             pc_ex <= 0; rd1_ex <= 0; rd2_ex <= 0; imm_ex <= 0;
+            is_csr_ex <= 0; a_zero_ex <= 0; a_pc_ex <= 0; link_ex <= 0; wr_ex <= 0; alu_res_ex <= 0;
             alu_op_ex <= 0; funct3_ex <= 0; opcode_ex <= 0; wb_sel_ex <= 0; rd_ex <= 0;
-        end else if (flush) begin   // synchronous squash (kept out of the async-reset term)
-            valid_ex <= 0; reg_write_ex <= 0; alu_src_b_ex <= 0;
+        end else if (flush) begin   // synchronous bubble
+            // synchronous bubble: only control bits are cleared; the datapath
+            // fields (pc/operands/imm/instr/fn) are don't-care while valid_ex=0
+            valid_ex <= 0; reg_write_ex <= 0;
             branch_ex <= 0; jump_ex <= 0; jalr_ex <= 0; is_mul_ex <= 0; is_div_ex <= 0;
-            mem_read_ex <= 0; mem_write_ex <= 0; instr_ex <= NOP;
-            fault_ex <= 0; fcause_ex <= 4'd0;
-            pc_ex <= 0; rd1_ex <= 0; rd2_ex <= 0; imm_ex <= 0;
-            alu_op_ex <= 0; funct3_ex <= 0; opcode_ex <= 0; wb_sel_ex <= 0; rd_ex <= 0;
+            mem_read_ex <= 0; mem_write_ex <= 0;
+            fault_ex <= 0; is_csr_ex <= 0; link_ex <= 0; wr_ex <= 0;
         end else if (!stall) begin
             valid_ex     <= valid_id;
             reg_write_ex <= (reg_write_id || is_mul_id || is_div_id) && ok_id && valid_id;
@@ -252,7 +270,15 @@ module core_top #(
             is_div_ex    <= is_div_id && valid_id;
             mem_read_ex  <= mem_read_id && ok_id && valid_id;
             mem_write_ex <= mem_write_id && ok_id && valid_id;
-            instr_ex     <= instr_id;
+            // priv_unit's decoder does not know M ops: present them as NOP
+            // (mux moved here from EX, off the priv_unit -> p_trap path)
+            instr_ex     <= (is_mul_id || is_div_id) ? NOP : instr_id;
+            is_csr_ex    <= is_csr_id && valid_id;
+            a_zero_ex    <= a_zero_id;
+            a_pc_ex      <= a_pc_id;
+            link_ex      <= link_id && valid_id;
+            wr_ex        <= wr_id;
+            alu_res_ex   <= !(is_mul_id || is_div_id || mem_read_id || link_id || is_csr_id);
             fault_ex     <= fault_id && valid_id;
             fcause_ex    <= fcause_id;
             pc_ex <= pc_id; rd1_ex <= rd1_id; rd2_ex <= rd2_id; imm_ex <= imm_id;
@@ -265,9 +291,9 @@ module core_top #(
     logic [31:0] alu_a, alu_b, alu_y;
     logic        alu_zero;
     always_comb begin
-        if (opcode_ex == 7'b0110111)      alu_a = 32'h0;   // LUI
-        else if (opcode_ex == 7'b0010111) alu_a = pc_ex;   // AUIPC
-        else                              alu_a = rd1_ex;
+        if (a_zero_ex)    alu_a = 32'h0;   // LUI   (select precomputed in ID)
+        else if (a_pc_ex) alu_a = pc_ex;   // AUIPC
+        else              alu_a = rd1_ex;
         alu_b = alu_src_b_ex ? imm_ex : rd2_ex;
     end
     alu u_alu (.a(alu_a), .b(alu_b), .op(alu_op_ex), .y(alu_y), .zero(alu_zero));
@@ -308,7 +334,7 @@ module core_top #(
     priv_unit u_priv (
         .clk, .rst_n,
         .instr_valid(ex_first),
-        .instr((is_mul_ex || is_div_ex) ? NOP : instr_ex),   // decoder doesn't know M ops
+        .instr(instr_ex),   // M ops already replaced by NOP in ID
         .pc(pc_ex), .rs1_data(rd1_ex),
         .mtip, .msip, .meip,
         .xcpt_valid(xcpt_any), .xcpt_cause(xcpt_cause_c), .xcpt_tval(xcpt_tval_c),
@@ -576,14 +602,17 @@ module core_top #(
     assign stall = !p_trap && ((valid_ex && is_mul_ex && !mul_done) ||
                                (valid_ex && is_div_ex && !div_done) || (mem_op && !lsu_done));
 
-    always_comb begin
-        if (is_mul_ex)            ex_result = mul_result;
-        else if (is_div_ex)       ex_result = div_result;
-        else if (mem_read_ex)     ex_result = load_data;
-        else if (p_rd_we)         ex_result = p_rd_wdata;
-        else if (wb_sel_ex == 2)  ex_result = pc_ex + 32'd4;
-        else                      ex_result = alu_y;
-    end
+    // Result select: the sources are mutually exclusive per instruction, so a
+    // one-hot AND-OR mux with selects registered in ID replaces the priority
+    // chain (and takes the late priv_unit rd_we out of the data select; the
+    // CSR value is only written when p_rd_we, see ex_wen).
+    assign ex_result = ({32{is_mul_ex}}   & mul_result)  |
+                       ({32{is_div_ex}}   & div_result)  |
+                       ({32{mem_read_ex}} & load_data)   |
+                       ({32{is_csr_ex}}   & p_rd_wdata)  |
+                       ({32{link_ex}}     & (pc_ex + 32'd4)) |
+                       ({32{alu_res_ex}}  & alu_y);
+    assign fwd_ex = valid_ex && wr_ex;
 
     logic squash_ld;
     assign squash_ld = mmu_xcpt;
