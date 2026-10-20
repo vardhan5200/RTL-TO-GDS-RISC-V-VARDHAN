@@ -53,9 +53,13 @@ puts "=== top 10 endpoints"
 report_checks -path_delay max -group_count 10 -endpoint_count 1 -format end -digits 3
 report_tns
 report_wns
+puts "=== pipeline groups"
+source syn/pipe_paths.tcl
 catch {set_power_activity -global -activity 0.1; report_power} msg
 puts \$msg
 exit
 TCL
 sta -no_splash "$OUT/sta.tcl" > "$OUT/sta.log" 2>&1 || true
 grep -E "Chip area|Number of cells" "$OUT/yosys.log" | tail -2
+grep -E "^(wns|tns)" "$OUT/sta.log"; grep -E "^Total" "$OUT/sta.log"
+awk '/=== pipeline groups/{f=1} f' "$OUT/sta.log" > "$OUT/pipe_paths.log"; syn/summarize.sh "$OUT/pipe_paths.log"
