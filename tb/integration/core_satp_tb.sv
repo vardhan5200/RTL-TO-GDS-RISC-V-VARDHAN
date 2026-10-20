@@ -1,11 +1,12 @@
 // core_satp_tb.sv — software-controlled MMU via the satp CSR (0x180).
-// core_top USE_MMU=1, flat 32 KiB memory shared by fetch and data, priv_mode=S
-// from the tb port (the core is M-only; M-mode is never translated). The
+// core_top USE_MMU=1, flat 32 KiB memory shared by fetch and data. The
 // program (gen_prog.py, core_satp_prog.hex):
-//   1. satp reads 0 after reset; loads/stores are Bare (PA = VA): VA 0x1000
+//   0. In M (never translated): satp reads 0 after reset; CSRW satp =
+//      0x80000002 read back; WARL check (all-ones -> 0x803FFFFF); CSRRC -> 0.
+//      Then MRET into S-mode (MPP=S); everything below runs in S.
+//   1. satp = 0: loads/stores are Bare (PA = VA): VA 0x1000
 //      reads PA 0x1000, VA 0x4000 reads PA 0x4000 without a fault.
-//   2. CSRW satp = 0x80000002 (Sv32, root PA 0x2000); read back; WARL check
-//      (all-ones -> 0x803FFFFF), CSRRC/CSRRS; VA 0x1000 now maps to PA 0x5000,
+//   2. CSRRS satp = 0x80000002 (Sv32, root PA 0x2000): VA 0x1000 now maps to PA 0x5000,
 //      a store goes to PA 0x5004 (not 0x1004), VA 0x4000 page-faults (13).
 //   3. CSRW satp = 0x80000006 (root PA 0x6000): VA 0x1000 -> PA 0x4000; the
 //      stale TLB entry (-> PA 0x5000) must have been flushed by the write.
@@ -19,7 +20,7 @@ module core_satp_tb;
     logic        dmem_re, dmem_we, mmu_fault;
     logic [3:0]  dmem_wstrb;
     logic [31:0] mem [0:8191];
-    localparam logic [31:0] PC_PF = 32'h60;   // printed by gen_prog.py
+    localparam logic [31:0] PC_PF = 32'h84;   // printed by gen_prog.py
     initial begin
         for (int k = 0; k < 8192; k++) mem[k] = 32'h0;
         $readmemh("tb/integration/core_satp_prog.hex", mem, 0, 127);
@@ -52,7 +53,7 @@ module core_satp_tb;
         .clk, .rst_n, .imem_addr, .imem_rdata,
         .dmem_re, .dmem_we, .dmem_addr, .dmem_wdata, .dmem_wstrb, .dmem_rdata,
         .meip(1'b0), .mtip(1'b0), .msip(1'b0),
-        .priv_mode(2'b01), .mmu_fault);
+        .mmu_fault);
 
     // page-table reads issued by the walker, and TLB flushes from satp writes
     int pte_reads = 0, satp_writes = 0;

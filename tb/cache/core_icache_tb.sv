@@ -69,7 +69,7 @@ module core_icache_tb;
         .clk, .rst_n, .imem_addr, .imem_rdata,
         .dmem_re, .dmem_we, .dmem_addr, .dmem_wdata, .dmem_wstrb, .dmem_rdata,
         .meip(1'b0), .mtip(1'b0), .msip(1'b0),
-        .priv_mode(2'b11), .mmu_fault);
+        .mmu_fault);
 
     int cycles = 0, retired = 0, miss_cyc = 0, refills = 0, redir_busy = 0, contract_err = 0, done_cyc = -1;
     logic        prev_miss;

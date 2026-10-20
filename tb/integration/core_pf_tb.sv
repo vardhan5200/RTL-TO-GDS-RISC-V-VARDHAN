@@ -1,7 +1,7 @@
 // core_pf_tb.sv — MMU page-fault traps on core_top (USE_MMU=1, D-side Sv32).
 // The program (gen_prog.py, core_pf_prog.hex) first enables Sv32 with
-// CSRW satp = 0x80000002 (root PA 0x2000); priv_mode=S from the tb port lets
-// the MMU translate (the core itself is M-only). It then does a faulting load (unmapped megapage), a faulting store (read-only page)
+// CSRW satp = 0x80000002 (root PA 0x2000) in M, then enters S-mode via MRET
+// (MPP=S) so fetch and data are translated. It then does a faulting load (unmapped megapage), a faulting store (read-only page)
 // and a faulting lb after a two-level walk (invalid L0 PTE). The M-mode
 // handler logs {mcause, mtval, mepc} to memory, advances mepc by 4 and MRETs.
 // Checks: causes 13/15/13, mtval = faulting VA, mepc = faulting pc, rd not
@@ -16,7 +16,7 @@ module core_pf_tb;
     logic [31:0] mem [0:4095];
     localparam logic [31:0] SENT = 32'hDEAD_BEEF;
     // fault pcs printed by gen_prog.py
-    localparam logic [31:0] PC_LD = 32'h38, PC_ST = 32'h40, PC_LD2 = 32'h4C;
+    localparam logic [31:0] PC_LD = 32'h58, PC_ST = 32'h60, PC_LD2 = 32'h6C;
     initial begin
         for (int k = 0; k < 4096; k++) mem[k] = 32'h0;
         $readmemh("tb/integration/core_pf_prog.hex", mem, 0, 127);
@@ -42,7 +42,7 @@ module core_pf_tb;
         .clk, .rst_n, .imem_addr, .imem_rdata,
         .dmem_re, .dmem_we, .dmem_addr, .dmem_wdata, .dmem_wstrb, .dmem_rdata,
         .meip(1'b0), .mtip(1'b0), .msip(1'b0),
-        .priv_mode(2'b01), .mmu_fault);
+        .mmu_fault);
 
     // trace every trap taken by the core
     always @(posedge clk)
@@ -73,7 +73,7 @@ module core_pf_tb;
         chk_trap(1, "store",      32'd15, 32'h00C0_0180, PC_ST);
         chk_trap(2, "load(L0)",   32'd13, 32'h0100_5007, PC_LD2);
         chk("traps taken (x24)",            dut.regs[24], 3);
-        chk("log ptr advanced (x31)",       dut.regs[31], 32'h0040_0300 + 36);
+        chk("log ptr advanced (x31)",       dut.regs[31], 32'h0000_0300 + 36);
         chk("faulting lw rd untouched x10", dut.regs[10], 32'h5A5);
         chk("faulting lb rd untouched x13", dut.regs[13], 32'h5A5);
         chk("post-fault instrs ran once",   dut.regs[20], 3);

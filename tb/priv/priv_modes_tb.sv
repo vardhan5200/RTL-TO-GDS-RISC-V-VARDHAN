@@ -4,7 +4,8 @@
 // previous mode, cur_priv = M); S-level CSR (satp) from U -> illegal, from S
 // legal; user counter from U legal; MRET from U -> illegal; ECALL cause 8/9/11;
 // M interrupts taken in U even with mstatus.MIE = 0, masked in M; MPRV/SUM/MXR
-// exported and MPRV cleared by an MRET to a lower mode.
+// exported and MPRV cleared by an MRET to a lower mode; SFENCE.VMA legal in
+// S/M (one-cycle sfence pulse), illegal in U.
 `timescale 1ns/1ps
 module priv_modes_tb;
     logic clk = 0, rst_n = 0;
@@ -17,12 +18,13 @@ module priv_modes_tb;
     logic [31:0] rd_wdata, redirect_pc, cause_o, satp_o;
     logic        satp_wr, mprv, sum, mxr;
     logic [1:0]  cur_priv, mpp;
+    logic        sfence;
 
     priv_unit dut (.clk, .rst_n, .instr_valid, .instr, .pc, .rs1_data,
                    .mtip, .msip, .meip, .rd_we, .rd_wdata, .redirect, .redirect_pc,
                    .trap, .irq_taken, .mret, .cause_o, .satp_o, .satp_wr_o(satp_wr),
                    .cur_priv, .mstatus_mpp(mpp), .mstatus_mprv(mprv),
-                   .mstatus_sum(sum), .mstatus_mxr(mxr));
+                   .mstatus_sum(sum), .mstatus_mxr(mxr), .sfence);
 
     integer pass = 0, fail = 0;
     task automatic check(input string name, input logic [31:0] got, input logic [31:0] exp);
@@ -40,11 +42,13 @@ module priv_modes_tb;
                       MCAUSE = 12'h342, MTVAL = 12'h343, SATP = 12'h180, CYCLE = 12'hC00;
 
     logic s_rd_we, s_redirect, s_trap, s_irq, s_mret; logic [31:0] s_rdata, s_rpc, s_cause;
+    logic s_sfence;
     task automatic step(input [31:0] i, input [31:0] p, input [31:0] r1 = 0);
         instr = i; pc = p; rs1_data = r1; instr_valid = 1;
         #1;
         s_rd_we = rd_we; s_rdata = rd_wdata; s_redirect = redirect; s_rpc = redirect_pc;
         s_trap = trap; s_irq = irq_taken; s_mret = mret; s_cause = cause_o;
+        s_sfence = sfence;
         @(posedge clk); #1;
         instr_valid = 0; instr = NOP;
     endtask
@@ -164,6 +168,21 @@ module priv_modes_tb;
         step(MRET, 32'h1F0);
         check("mret to S clears MPRV", mprv, 0); check("SUM kept", sum, 1);
         check("in S", cur_priv, S);
+
+        // ---- SFENCE.VMA rs1, rs2 (funct7=0001001): legal in S/M, illegal in U ----
+        ins = {7'b0001001, 5'd6, 5'd5, 3'b000, 5'd0, 7'h73};   // sfence.vma x5, x6
+        step(ins, 32'h4000);
+        check("S sfence.vma: no trap", s_trap, 0); check("S sfence pulse", s_sfence, 1);
+        check("S sfence: no rd write", s_rd_we, 0); check("still S", cur_priv, S);
+        step(ECALL, 32'h4004);
+        chk_trap("S ecall (after sfence)", 9, 32'h4004, 0, S);
+        step({7'b0001001, 5'd0, 5'd0, 3'b000, 5'd0, 7'h73}, 32'h108);  // sfence.vma in M
+        check("M sfence.vma: no trap", s_trap, 0); check("M sfence pulse", s_sfence, 1);
+        step(NOP, 32'h10C); check("sfence pulse is one cycle", s_sfence, 0);
+        enter(U, 32'h5000);
+        step(ins, 32'h5000);
+        check("U sfence.vma: no pulse", s_sfence, 0);
+        chk_trap("U sfence.vma", 2, 32'h5000, ins, U);
 
         $display("PRIV MODES TESTS: %0d passed, %0d failed", pass, fail);
         if (fail == 0) $display("PRIV MODES: PASSED"); else $display("PRIV MODES: FAILED");

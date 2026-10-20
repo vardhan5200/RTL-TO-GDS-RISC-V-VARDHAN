@@ -25,6 +25,10 @@
 //   * all traps enter M-mode: MPP <= cur_priv, cur_priv <= M (no delegation).
 //   * MRET (M-mode only): redirect to mepc, cur_priv <= MPP, MPP <= U,
 //     MIE <= MPIE, MPIE <= 1.
+//   * SFENCE.VMA (funct7=0001001, rs1/rs2 ignored = flush all, rd=0): legal
+//     in M and S, illegal in U (no mstatus.TVM). sfence pulses when it
+//     commits; the core flushes both TLBs, the fetch translation and the
+//     pipeline.
 //   * exports cur_priv and the mstatus MPP/MPRV/SUM/MXR bits so the core can
 //     compute the effective privilege for MMU data accesses.
 //   * exports the Sv32 satp CSR (0x180, in csr_file) as satp_o, and
@@ -57,7 +61,8 @@ module priv_unit #(
     output logic        satp_wr_o,      // satp written this cycle
     output logic [1:0]  cur_priv,       // current privilege: 00 U, 01 S, 11 M
     output logic [1:0]  mstatus_mpp,
-    output logic        mstatus_mprv, mstatus_sum, mstatus_mxr
+    output logic        mstatus_mprv, mstatus_sum, mstatus_mxr,
+    output logic        sfence          // SFENCE.VMA committed this cycle
 );
     // ---- base-ISA legality from the existing decoder (unmodified) ----
     logic dec_illegal;
@@ -80,6 +85,8 @@ module priv_unit #(
     wire is_ebreak = is_priv0 && (instr[31:20] == 12'h001);
     wire is_mret   = is_priv0 && (instr[31:20] == 12'h302);
     wire is_wfi    = is_priv0 && (instr[31:20] == 12'h105); // treated as NOP
+    wire is_sfence = is_system && (funct3 == 3'b000) && (rd == 5'd0) &&
+                     (instr[31:25] == 7'b0001001);           // SFENCE.VMA rs1, rs2
 
     // ---- CSR file ----
     logic [31:0] csr_rdata, mtvec, mepc, mie_v, mip_v;
@@ -111,9 +118,10 @@ module priv_unit #(
     end
 
     // ---- exception selection ----
-    wire illegal = (is_system ? !(is_csr || is_ecall || is_ebreak || is_mret || is_wfi)
+    wire illegal = (is_system ? !(is_csr || is_ecall || is_ebreak || is_mret || is_wfi || is_sfence)
                               : dec_illegal) || (is_csr && csr_illegal) ||
-                   (is_mret && cur_priv != 2'b11);
+                   (is_mret && cur_priv != 2'b11) ||
+                   (is_sfence && cur_priv == 2'b00);
 
     always @(*) begin
         irq_taken  = instr_valid && irq_pend && !xcpt_valid;
@@ -132,6 +140,7 @@ module priv_unit #(
         trap    = trap_take;
         cause_o = trap_cause;
         mret    = instr_valid && is_mret && !trap_take;
+        sfence  = instr_valid && is_sfence && !trap_take;
 
         redirect = trap_take || mret;
         if (mret)

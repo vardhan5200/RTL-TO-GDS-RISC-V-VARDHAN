@@ -3,7 +3,8 @@
 # without the MMU in the data path, a core-level Sv32 translation test and a
 # core-level DIV/DIVU/REM/REMU test, a core-level MMU page-fault trap test and
 # a satp CSR test (software enables / disables / re-roots the MMU) and an
-# instruction-fetch translation / instruction page-fault test.
+# instruction-fetch translation / instruction page-fault test, fetch
+# translation following the privilege mode, and SFENCE.VMA TLB flushes.
 set -u
 cd "$(dirname "$0")/../.."
 OUT=${SIM_OUT:-/tmp/integration_sim}; mkdir -p "$OUT"
@@ -27,4 +28,6 @@ run core_div        "CORE DIV: PASS"         -s core_div_tb $CORE tb/integration
 run core_pf         "CORE PAGE FAULT: PASS"  -s core_pf_tb $CORE tb/integration/core_pf_tb.sv
 run core_satp       "CORE SATP: PASS"        -s core_satp_tb $CORE tb/integration/core_satp_tb.sv
 run core_ifetch     "CORE IFETCH: PASS"      -s core_ifetch_tb $CORE tb/integration/core_ifetch_tb.sv
+run core_fetch_priv "CORE FETCH PRIV: PASS"  -s core_fetch_priv_tb $CORE tb/integration/core_fetch_priv_tb.sv
+run core_sfence     "CORE SFENCE: PASS"      -s core_sfence_tb $CORE tb/integration/core_sfence_tb.sv
 [ $fail -eq 0 ] && echo "ALL INTEGRATION TESTS PASSED" || { echo "INTEGRATION TESTS FAILED"; exit 1; }

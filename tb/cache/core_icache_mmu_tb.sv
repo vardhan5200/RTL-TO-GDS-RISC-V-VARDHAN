@@ -1,6 +1,6 @@
 // core_icache_mmu_tb.sv — L1 I-cache behind Sv32 fetch translation (core_top,
-// USE_MMU=1, priv_mode=S from the tb port so fetch is translated once satp is
-// set). Flat 32 KiB memory shared by fetch and data. Sv32 map (root PA 0x2000,
+// USE_MMU=1; the program drops from M to S-mode via MRET at reset so fetch is
+// translated once satp is set). Flat 32 KiB memory shared by fetch and data. Sv32 map (root PA 0x2000,
 // L1[0] -> L0 at PA 0x3000):
 //   VA 0x0000 -> PA 0x0000 RWX  main program, trap handler (0x140), log, signature
 //   VA 0x1000 -> PA 0x5000 RX   code A   (PA 0x1000 holds decoy code)
@@ -41,7 +41,7 @@ module core_icache_mmu_tb;
     function automatic logic [31:0] csrrs(int rd, int csr, int rs1);
         return {csr[11:0], rs1[4:0], 3'b010, rd[4:0], 7'h73}; endfunction
     localparam logic [31:0] MRET = 32'h3020_0073, FENCE_I = 32'h0000_100F;
-    localparam int SATP = 'h180, MTVEC = 'h305, MEPC = 'h341, MCAUSE = 'h342, MTVAL = 'h343;
+    localparam int MSTATUS = 'h300, SATP = 'h180, MTVEC = 'h305, MEPC = 'h341, MCAUSE = 'h342, MTVAL = 'h343;
     localparam logic [31:0] PATCH = 32'h0770_0613;           // addi x12, x0, 0x77
     localparam logic [31:0] SIG   = 32'h1FE7_C00D;
     task automatic P(int a, logic [31:0] w); mem[a >> 2] = w; endtask
@@ -50,9 +50,10 @@ module core_icache_mmu_tb;
         for (int k = 0; k < 8192; k++) mem[k] = 32'h0000_0013;              // NOPs
         for (int k = 'h2000 >> 2; k < ('h4000 >> 2); k++) mem[k] = 32'h0;   // page tables
         // main (VA = PA page 0)
-        P('h00, lui (1, 'h80000));      P('h04, addi(1, 1, 2));    // x1 = satp value
+        P('h00, jal (0, 'h80));                                    // -> S-mode entry stub (0x80)
+        P('h04, addi(1, 1, 2));                                    // x1 = satp value
         P('h08, addi(31, 0, 'h300));                               // trap log pointer
-        P('h0C, addi(5, 0, 'h140));     P('h10, csrrw(0, MTVEC, 5));
+        P('h0C, addi(0, 0, 0));         P('h10, addi(0, 0, 0));    // (mtvec set in the M-mode stub)
         P('h14, csrrw(0, SATP, 1));                                // Sv32 on (flush, refetch)
         P('h18, lui (6, 1));                                       // x6 = VA 0x1000
         P('h1C, jalr(1, 6, 0));                                    // call A: I$ miss
@@ -69,6 +70,11 @@ module core_icache_mmu_tb;
         P('h54, lui (22, 'h1FE7C));     P('h58, addi(22, 22, 'h00D));
         P('h5C, sw  (22, 0, 'h3F0));                               // signature
         P('h60, jal (0, 0));
+        // S-mode entry stub (M-mode, Bare): x1 = 0x80000000, mtvec = 0x140,
+        // mstatus.MPP = S, mepc = 0x04, MRET -> main continues at 0x04 in S-mode
+        P('h80, lui (1, 'h80000));      P('h84, addi(5, 0, 'h140)); P('h88, csrrw(0, MTVEC, 5));
+        P('h8C, lui (5, 1));            P('h90, addi(5, 5, -2048)); P('h94, csrrw(0, MSTATUS, 5));
+        P('h98, addi(5, 0, 4));         P('h9C, csrrw(0, MEPC, 5)); P('hA0, MRET);
         // trap handler (VA = PA 0x140): log {mcause, mtval, mepc}, return to ra
         P('h140, csrrs(25, MCAUSE, 0)); P('h144, csrrs(26, MTVAL, 0)); P('h148, csrrs(27, MEPC, 0));
         P('h14C, sw(25, 31, 0));        P('h150, sw(26, 31, 4));       P('h154, sw(27, 31, 8));
@@ -100,7 +106,7 @@ module core_icache_mmu_tb;
         .clk, .rst_n, .imem_addr, .imem_rdata,
         .dmem_re, .dmem_we, .dmem_addr, .dmem_wdata, .dmem_wstrb, .dmem_rdata,
         .meip(1'b0), .mtip(1'b0), .msip(1'b0),
-        .priv_mode(2'b01), .mmu_fault, .cur_priv);
+        .mmu_fault, .cur_priv);
 
     // VA -> PA of this map (page 0 is identity, so it also covers Bare fetch)
     function automatic logic [31:0] va2pa(logic [31:0] va);

@@ -39,6 +39,14 @@ def set_satp(tmp, val):
     """lui/addi tmp = val; csrw satp, tmp (3 words; val[11] must be 0)."""
     assert (val & 0x800) == 0
     return [lui(tmp, val >> 12), addi(tmp, tmp, val & 0x7ff), csrrw(0, SATP, tmp)]
+def enter_s(tmp, pc):
+    """From M: mstatus.MPP = S, mepc = next instruction, MRET (9 words placed
+    at byte address pc); execution continues in S-mode right after them."""
+    tgt = pc + 9 * 4
+    assert tgt < 0x800
+    return [lui(tmp, 0x2), addi(tmp, tmp, -0x800), csrrc(0, MSTATUS, tmp),   # MPP = U (clear 0x1800)
+            lui(tmp, 0x1), addi(tmp, tmp, -0x800), csrrs(0, MSTATUS, tmp),   # MPP = S (0x800)
+            addi(tmp, 0, tgt), csrrw(0, MEPC, tmp), MRET]
 
 HANDLER = 40 * 4
 prog = {}
@@ -112,6 +120,9 @@ MMU_H = 32                        # handler word index
 mmu = set_satp(11, 0x8000_0002) + [   # software enables Sv32, root PPN 2 (PA 0x2000)
     addi(8, 0, MMU_H * 4),
     csrrw(0, MTVEC, 8),           # page faults now trap -> handler skips the load
+]
+mmu += enter_s(11, 4 * len(mmu))  # M -> S: fetch and data are translated from here on
+mmu += [
     lui(1, 0x400),                # x1 = 0x0040_0000
     addi(2, 0, 0x55),
     sw(2, 1, 0x100),              # VA 0x400100 -> PA 0x100
@@ -191,7 +202,8 @@ def P(w, tag=None):
     pf.append(w)
 for w in set_satp(29, 0x8000_0002): P(w)      # software enables Sv32, root PA 0x2000
 P(addi(1, 0, PF_H * 4)); P(csrrw(0, MTVEC, 1))
-P(lui(31, 0x400)); P(addi(31, 31, 0x300))     # trap log pointer: VA 0x400300 (PA 0x300)
+P(addi(31, 0, 0x300))                         # trap log pointer: PA 0x300 (handler runs in M, untranslated)
+for w in enter_s(29, 4 * len(pf)): P(w)       # M -> S: translated from here on
 P(lui(2, 0x400))                              # RW megapage
 P(lui(3, 0x800))                              # unmapped
 P(lui(4, 0xC00))                              # read-only megapage
@@ -227,7 +239,7 @@ with open(out4, "w") as f:
         f.write("%08x\n" % (pf[k] if k < len(pf) else 0x00000013))
 print("wrote", out4, "fault pcs:", {k: hex(v) for k, v in pf_pc.items()})
 
-# ---- satp CSR test (core_satp_tb.sv, flat 32 KiB memory, USE_MMU=1, priv_mode=S) ----
+# ---- satp CSR test (core_satp_tb.sv, flat 32 KiB memory, USE_MMU=1, program enters S-mode via MRET) ----
 # Root A at PA 0x2000 (satp 0x80000002): L1[0] -> L0 at PA 0x3000;
 #   L0[1]: VA 0x1000 -> PA 0x5000 (V|R|W|A|D), L0[4]: VA 0x4000 invalid.
 # Root B at PA 0x6000 (satp 0x80000006): L1[0] -> L0 at PA 0x7000;
@@ -246,17 +258,19 @@ T(lui(3, 0x4))                                # x3 = VA 0x4000
 T(addi(4, 0, 0xA1)); T(addi(5, 0, 0xB2))
 T(addi(19, 0, 0x5A5))                         # sentinel for the faulting load
 T(csrrs(6, SATP, 0))                          # x6 = satp after reset (0)
-# --- phase 1: satp = 0 -> Bare ---
-T(lw(7, 2, 0))                                # PA 0x1000 -> 0x11111111
-T(lw(8, 3, 0))                                # PA 0x4000 -> 0x44444444 (no fault)
-T(sw(4, 2, 4))                                # PA 0x1004 = 0xA1
-# --- phase 2: enable Sv32, root A ---
+# --- CSR checks in M (fetch untranslated, so a junk root is harmless) ---
 for w in set_satp(9, 0x8000_0002): T(w)
 T(csrrs(10, SATP, 0))                         # x10 = 0x80000002
 T(addi(11, 0, -1)); T(csrrw(12, SATP, 11))    # x12 = old 0x80000002; write all-ones
 T(csrrs(13, SATP, 0))                         # x13 = 0x803FFFFF (ASID WARL 0)
 T(csrrc(0, SATP, 11)); T(csrrs(14, SATP, 0))  # CSRRC all -> x14 = 0
-T(csrrs(0, SATP, 9))                          # CSRRS -> satp = 0x80000002 again
+for w in enter_s(28, 4 * len(st)): T(w)       # M -> S; the rest runs in S-mode
+# --- phase 1: satp = 0 -> Bare ---
+T(lw(7, 2, 0))                                # PA 0x1000 -> 0x11111111
+T(lw(8, 3, 0))                                # PA 0x4000 -> 0x44444444 (no fault)
+T(sw(4, 2, 4))                                # PA 0x1004 = 0xA1
+# --- phase 2: enable Sv32 from S, root A ---
+T(csrrs(0, SATP, 9))                          # CSRRS -> satp = 0x80000002
 T(lw(15, 2, 0))                               # VA 0x1000 -> PA 0x5000: 0x55555555
 T(sw(5, 2, 4))                                # VA 0x1004 -> PA 0x5004 = 0xB2
 T(lw(16, 2, 4))                               # 0xB2 (TLB hit)
@@ -289,7 +303,7 @@ with open(out5, "w") as f:
         f.write("%08x\n" % (st[k] if k < len(st) else 0x00000013))
 print("wrote", out5, "fault pcs:", {k: hex(v) for k, v in st_pc.items()})
 
-# ---- instruction-fetch translation test (core_ifetch_tb.sv, flat 32 KiB, USE_MMU=1, priv_mode=S) ----
+# ---- instruction-fetch translation test (core_ifetch_tb.sv, flat 32 KiB, USE_MMU=1, program enters S-mode via MRET) ----
 # satp 0x80000002: root PA 0x2000, L1[0] -> L0 at PA 0x3000 (PTEs set by the tb):
 #   L0[0] VA 0x0000 -> PA 0x0000 RWX (main program, handler, log, signature)
 #   L0[1] VA 0x1000 -> PA 0x5000 RX  (code A; PA 0x1000 holds decoy code B)
@@ -310,8 +324,9 @@ def F(w, tag=None):
 F(addi(2, 0, IF_H)); F(csrrw(0, MTVEC, 2))
 F(addi(31, 0, 0x300))                          # trap log pointer (PA 0x300)
 F(addi(7, 0, 100)); F(addi(8, 0, 7))
-for w in set_satp(9, 0x8000_0002): F(w)        # fetch translated from the next instruction on
+for w in set_satp(9, 0x8000_0002): F(w)        # set in M: fetch still untranslated
 F(csrrs(20, SATP, 0))                          # x20 = 0x80000002
+for w in enter_s(9, 4 * len(ifm)): F(w)        # M -> S: fetch translated from here on
 F(jal(0x1000 - 4 * len(ifm), 1), "callA")      # VA 0x1000 -> PA 0x5000 (code A), returns
 F(lui(5, 0x4)); F(jalr(1, 5, 0), "j4000")      # unmapped VA 0x4000 -> fetch PF
 F(addi(21, 21, 1))
@@ -352,3 +367,110 @@ with open(out6, "w") as f:
         f.write("@%x\n" % (base // 4))
         for w in sections[base]: f.write("%08x\n" % w)
 print("wrote", out6, "pcs:", {k: hex(v) for k, v in ifm_pc.items()})
+
+# ---- small label assembler for the privilege / sfence tests ----
+slli   = lambda rd, rs1, sh: i(sh & 0x1f, rs1, 1, rd, 0x13)
+beq    = lambda rs1, rs2, off: b(off, rs2, rs1, 0)
+sfence_vma = lambda rs1, rs2: (0x09 << 25) | (rs2 << 20) | (rs1 << 15) | 0x73
+class Asm:
+    """Sections of code at byte addresses; items may be callables
+    f(pc, labels) -> word, resolved after all labels are known."""
+    def __init__(self): self.sec, self.lab, self.cur = {}, {}, None
+    def org(self, a): self.cur = a; self.sec.setdefault(a, [])
+    def pc(self): return self.cur + 4 * len(self.sec[self.cur])
+    def label(self, n): self.lab[n] = self.pc()
+    def __call__(self, *ws):
+        for w in ws: self.sec[self.cur].append(w)
+    def write(self, name):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+        with open(path, "w") as f:
+            for base in sorted(self.sec):
+                f.write("@%x\n" % (base // 4))
+                for k, w in enumerate(self.sec[base]):
+                    if callable(w): w = w(base + 4 * k, self.lab)
+                    f.write("%08x\n" % (w & 0xffffffff))
+        return path
+def trace(a, ident):
+    """Snippet: x9 = (x9 << 4) | ident; return via ra."""
+    a(slli(9, 9, 4), addi(9, 9, ident), jalr(0, 1, 0))
+
+# ---- fetch translation follows the privilege mode (core_fetch_priv_tb.sv) ----
+# satp 0x80000002, root PA 0x2000, L1[0] -> L0 at PA 0x3000 (PTEs set by the tb):
+#   L0[0] VA 0x0000 -> PA 0x0000 RWX, U=0  (main program: M, then S)
+#   L0[1] VA 0x1000 -> PA 0x5000 RX,  U=0  (S code A; PA 0x1000 = decoy B)
+#   L0[4] VA 0x4000 -> PA 0x7000 RX,  U=1  (U code; PA 0x4000 = decoy D)
+#   L0[5] invalid (PA 0x5000 holds A: runs in M, faults in S)
+#   L0[6] invalid (the M handler lives at PA 0x6000: it only works untranslated)
+# Each snippet appends its id to x9; the handler appends F on a page fault,
+# so x9 records which code ran in which order: expected 0xBADAFCFD.
+fp = Asm()
+fp.org(0)
+fp(lui(2, 0x6), csrrw(0, MTVEC, 2))           # handler at PA 0x6000
+fp(addi(31, 0, 0x300))                         # trap log (PA 0x300)
+fp(*set_satp(3, 0x8000_0002))                  # Sv32 on; M still fetches physically
+fp(lambda pc, L: jal(0x1000 - pc, 1))          # M: VA 0x1000 = PA 0x1000 -> B
+fp(lui(5, 0x5), jalr(1, 5, 0))                 # M: VA 0x5000 = PA 0x5000 -> A, no fault
+fp(lui(5, 0x4), jalr(1, 5, 0))                 # M: VA 0x4000 = PA 0x4000 -> D
+fp(*enter_s(3, fp.pc()))                       # MRET -> S
+fp.label("s_main")
+fp(lambda pc, L: jal(0x1000 - pc, 1))          # S: VA 0x1000 -> PA 0x5000 -> A
+fp(lui(5, 0x5)); fp.label("s_pf"); fp(jalr(1, 5, 0))   # S: VA 0x5000 invalid -> PF 12 (F)
+fp(lui(8, 0x4), ECALL)                         # S ecall: handler drops to U at VA 0x4000
+fp.label("m_back")                             # U ecall returns here in M
+fp(lui(5, 0x4), jalr(1, 5, 0))                 # M: PA 0x4000 -> D
+fp(lui(30, 0xF7C4D), addi(30, 30, 0x00D))      # signature 0xF7C4D00D
+fp(sw(30, 0, 0x3F0), jal(0, 0))
+fp.org(0x1000); trace(fp, 0xB)
+fp.org(0x4000); trace(fp, 0xD)
+fp.org(0x5000); trace(fp, 0xA)
+fp.org(0x7000)                                 # U code (VA 0x4000)
+fp.label("u_main")
+fp(jal(0x100, 1))                              # U: VA 0x4100 -> PA 0x7100 -> C
+fp(lui(5, 0x1)); fp.label("u_pf"); fp(jalr(1, 5, 0))   # U: VA 0x1000 is a U=0 page -> PF 12 (F)
+fp(lambda pc, L: addi(8, 0, L["m_back"]), ECALL)       # U ecall: back to M at m_back
+fp.org(0x7100); trace(fp, 0xC)
+fp.org(0x6000)                                 # M-mode trap handler
+fp(csrrs(25, MCAUSE, 0), csrrs(26, MTVAL, 0), csrrs(27, MEPC, 0), csrrs(28, MSTATUS, 0))
+fp(sw(25, 31, 0), sw(26, 31, 4), sw(27, 31, 8), sw(28, 31, 12), addi(31, 31, 16))
+fp(addi(24, 24, 1))                            # trap count
+fp(lui(29, 0x2), addi(29, 29, -0x800))         # x29 = 0x1800 (MPP mask)
+fp(addi(23, 0, 12), lambda pc, L: beq(25, 23, L["h_pf"] - pc))
+fp(addi(23, 0, 9),  lambda pc, L: beq(25, 23, L["h_to_u"] - pc))
+fp(csrrs(0, MSTATUS, 29), csrrw(0, MEPC, 8), MRET)     # cause 8: MPP = M, resume at x8
+fp.label("h_to_u")
+fp(csrrc(0, MSTATUS, 29), csrrw(0, MEPC, 8), MRET)     # cause 9: MPP = U, resume at x8
+fp.label("h_pf")
+fp(slli(9, 9, 4), addi(9, 9, 0xF), csrrw(0, MEPC, 1), MRET)   # PF: mark F, resume at ra
+out7 = fp.write("core_fetch_priv_prog.hex")
+print("wrote", out7, {k: hex(v) for k, v in fp.lab.items()})
+
+# ---- SFENCE.VMA flushes the D-TLB, I-TLB and fetch translation (core_sfence_tb.sv) ----
+# satp 0x80000002, root PA 0x2000, L1[0] -> L0 at PA 0x3000; runs in S-mode:
+#   L0[0] VA 0x0000 -> PA 0x0000 RWX (code, signature)
+#   L0[1] VA 0x1000 -> PA 0x5000 RW  (data 0x55555555; remapped to PA 0x6000 = 0x66666666)
+#   L0[2] VA 0x2000 -> PA 0x4000 RX  (code P, id 1; remapped to PA 0x7000 = code Q, id 2)
+#   L0[3] VA 0x3000 -> PA 0x3000 RW  (the L0 table itself, so S can edit PTEs)
+sf = Asm()
+sf.org(0)
+sf(addi(2, 0, 0x200), csrrw(0, MTVEC, 2))     # handler (no trap expected)
+sf(*set_satp(3, 0x8000_0002))
+sf(*enter_s(3, sf.pc()))
+sf(lui(2, 0x1), lui(6, 0x3), lui(5, 0x2))      # x2 = VA 0x1000, x6 = VA 0x3000, x5 = VA 0x2000
+sf(lw(10, 2, 0))                               # fills D-TLB: 0x55555555
+sf(jalr(1, 5, 0))                              # fills I-TLB: code P (x9 = 1)
+sf(lui(7, 0x2), addi(7, 7, 0x18C7 - 0x2000), sw(7, 6, 4))   # L0[1] = PPN 6, V|R|W|A|D
+sf(lui(7, 0x2), addi(7, 7, 0x1CCB - 0x2000), sw(7, 6, 8))   # L0[2] = PPN 7, V|R|X|A|D
+sf(lw(11, 2, 0))                               # stale D-TLB entry: still 0x55555555
+sf(jalr(1, 5, 0))                              # stale I-TLB entry: code P again (x9 = 0x11)
+sf.label("sfence")
+sf(sfence_vma(2, 0))                           # sfence.vma x2, x0 (rs1 ignored: flush all)
+sf(lw(12, 2, 0))                               # new mapping: 0x66666666
+sf(jalr(1, 5, 0))                              # new mapping: code Q (x9 = 0x112)
+sf(lui(30, 0x5FE7C), addi(30, 30, 0x00D))      # signature 0x5FE7C00D
+sf(sw(30, 0, 0x3F0), jal(0, 0))
+sf.org(0x200)                                  # handler: count, skip, return
+sf(addi(24, 24, 1), csrrs(27, MEPC, 0), addi(27, 27, 4), csrrw(0, MEPC, 27), MRET)
+sf.org(0x4000); trace(sf, 0x1)
+sf.org(0x7000); trace(sf, 0x2)
+out8 = sf.write("core_sfence_prog.hex")
+print("wrote", out8, {k: hex(v) for k, v in sf.lab.items()})
