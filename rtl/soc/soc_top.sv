@@ -56,12 +56,16 @@ module soc_top #(
                                                           : 32'h0000_0013;
 
     // ---------------- Decode ----------------
-    logic rom_sel, sram_sel, uart_sel, gpio_sel, done_sel, timer_sel, irq_sel, unmapped;
+    // soc_top (legacy single-cycle SoC) does not implement the UART register
+    // block or main RAM: those regions are treated as unmapped here.
+    logic rom_sel, sram_sel, uart_sel, gpio_sel, done_sel, timer_sel, irq_sel;
+    logic uartb_sel, mem_sel, dec_unmapped, unmapped;
     addr_decode u_dec (
         .addr(dmem_addr),
         .rom_sel, .sram_sel, .uart_sel, .gpio_sel, .done_sel,
-        .timer_sel, .irq_sel, .unmapped
+        .timer_sel, .irq_sel, .uartb_sel, .mem_sel, .unmapped(dec_unmapped)
     );
+    assign unmapped = dec_unmapped || uartb_sel || mem_sel;
 
     // ---------------- Timer + IRQ controller ----------------
     logic [31:0] timer_rdata, irq_rdata;
