@@ -1,15 +1,16 @@
-# Quick PPA: integrated core (`integrate/core-v2`) on sky130hd
+# Quick PPA: integrated core (`integrate/core-v2` @ `53f6ec9`, STALE) on sky130hd
 
 A quick synthesis, floorplan, placement and CTS run in OpenROAD-flow-scripts (ORFS) to get first
 area, timing and power numbers. There is no global or detailed routing, so the timing and power
 below use placement-estimated parasitics.
 
-> **Stale numbers.** This report was measured on `53f6ec9`, before the I-cache (`feat/icache-v2`)
-> and the PPA branches (`feat/ppa-alu-regfile`, `feat/ppa-pipeline`) were merged, and with the
-> since-removed `split_async_flush.py` workaround. Its area, power and timing numbers need a
-> re-run on the current `integrate/core-v2`. The flow now lives in `syn/orfs/` (the former
-> `flow/` directory was merged into it); its default clock is 10 ns, so use
-> `CLK_PERIOD_NS=20` to reproduce the 50 MHz setup below.
+> **⚠ STALE — DO NOT CITE. Re-run pending.** Every area, timing and power number in this report was
+> measured on **`53f6ec9`**, using the since-removed `split_async_flush.py` workaround. That was
+> before the I-cache (`feat/icache-v2`) and the PPA refactor branches (`feat/ppa-alu-regfile`,
+> `feat/ppa-pipeline`) were merged, so the numbers do not describe the current
+> `integrate/core-v2` RTL (`04ed8cd`). No numbers have been measured since. The flow now lives in
+> `syn/orfs/`; its default clock is 10 ns, so use `CLK_PERIOD_NS=20` to reproduce the 50 MHz setup below.
+> `syn/PPA_RESULTS.md` (10 ns, `feat/ppa-pipeline`) also predates the I-cache merge.
 
 | | |
 |---|---|
