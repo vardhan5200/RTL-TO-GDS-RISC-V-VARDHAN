@@ -1,4 +1,9 @@
-// mul.sv — corrected shift-and-add
+// mul.sv — shift-and-add multiplier (low 32 bits of a*b), 32 iterations.
+//   start (while idle) latches a/b; done pulses one cycle after the 32nd
+//   iteration. `result` is the accumulator itself: it is only meaningful on
+//   and after the done cycle and is held until the next start (consumers
+//   sample it on done). All datapath flops are enable-gated (update only on
+//   start or while running), so the unit does not toggle when idle.
 module mul (
     input  logic        clk,
     input  logic        rst_n,
@@ -9,7 +14,7 @@ module mul (
     output logic        done
 );
     logic [31:0] multiplicand, multiplier, acc;
-    logic [5:0]  cnt;
+    logic [4:0]  cnt;          // 0..31
     logic        running;
 
     always_ff @(posedge clk or negedge rst_n) begin
@@ -18,7 +23,6 @@ module mul (
             done    <= 0;
             acc     <= 0;
             cnt     <= 0;
-            result  <= 0;
         end else begin
             done <= 0;
             if (start && !running) begin
@@ -33,12 +37,12 @@ module mul (
                 multiplier   <= multiplier >> 1;
                 multiplicand <= multiplicand << 1;
                 cnt <= cnt + 1;
-                if (cnt == 6'd31) begin
+                if (cnt == 5'd31) begin
                     running <= 0;
                     done    <= 1;
-                    result  <= multiplier[0] ? (acc + multiplicand) : acc;
                 end
             end
         end
     end
+    assign result = acc;
 endmodule
