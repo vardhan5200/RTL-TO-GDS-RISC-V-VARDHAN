@@ -161,7 +161,7 @@ module core_top #(
     assign valid_id = !bubble_id;
     assign ok_id    = !illegal_id || is_mul_id || is_div_id;   // side effects allowed
 
-    logic [31:0] regs [0:31];
+    logic [31:0] regs [1:31];   // x0 is hard-wired: no storage
     logic        ex_wen;
     logic [4:0]  rd_ex;
     logic [31:0] ex_result, rd1_id, rd2_id;
@@ -538,7 +538,7 @@ module core_top #(
     assign retire = valid_ex && !stall && !p_trap;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            for (int i = 0; i < 32; i++) regs[i] <= 32'h0;
+            for (int i = 1; i < 32; i++) regs[i] <= 32'h0;
         end else if (ex_wen) begin
             regs[rd_ex] <= ex_result;
         end
