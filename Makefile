@@ -7,9 +7,10 @@ export SIM_OUT
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
-.PHONY: test test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration test-ppa-check
+.PHONY: test test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration test-ppa-check \
+        perf test-perf perf-sw
 
-test: test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration test-ppa-check
+test: test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration test-ppa-check test-perf
 	@echo "== make test: all suites passed"
 
 # Pre-existing self-checking unit / single-cycle / legacy SoC benches
@@ -58,3 +59,18 @@ test-integration:
 test-ppa-check:
 	@r=$$(SIM_OUT=$(SIM_OUT)/ppa_checks bash tb/ppa/run_ppa_checks.sh); echo "$$r"; \
 	  echo "$$r" | grep -q "ALU EQUIV: PASS" && echo "$$r" | grep -q "MUL_RAND: ALL TESTS PASSED"
+
+# SoC microbenchmarks (sw/perf on soc_core_top): CPI loop, I/D-cache cold/warm,
+# MUL/DIV latency, load/store throughput, web-like request loop. Prints PERF
+# lines; PASS/FAIL is functional only. Uses the committed sw/perf/perf.hex.
+perf:
+	bash tb/perf/run_perf.sh
+
+# same run inside `make test`: only the per-check and suite verdict lines
+test-perf:
+	@r=$$(SIM_OUT=$(SIM_OUT) bash tb/perf/run_perf.sh) || { echo "$$r" | grep -E "FAIL|TIMEOUT|CHECK"; echo "PERF SUITE: FAIL"; exit 1; }; \
+	  echo "$$r" | grep -E "^PERF SUITE"
+
+# rebuild sw/perf/perf.hex (needs riscv64-unknown-elf-gcc)
+perf-sw:
+	$(MAKE) -C sw/perf
