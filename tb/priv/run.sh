@@ -9,7 +9,7 @@ cd "$(dirname "$0")/../.."
 OUT=${SIM_OUT:-/tmp/priv_sim}; mkdir -p "$OUT"
 PRIV="rtl/cpu/decoder.sv rtl/priv/csr_file.sv rtl/priv/priv_unit.sv"
 CORE="rtl/cpu/decoder.sv rtl/cpu/imm_gen.sv rtl/cpu/alu.sv rtl/cpu/branch_unit.sv rtl/cpu/mul.sv
-      rtl/cpu/div.sv rtl/cpu/div_unit.sv rtl/cache/dm_cache.sv rtl/priv/csr_file.sv
+      rtl/cpu/div.sv rtl/cpu/div_unit.sv rtl/cache/dm_cache.sv rtl/cache/icache.sv rtl/priv/csr_file.sv
       rtl/priv/priv_unit.sv rtl/mmu/*.sv rtl/core/core_top.sv"
 fail=0
 run() { local top=$1 pat=$2; shift 2

@@ -10,7 +10,7 @@ OUT=${SIM_OUT:-/tmp/integration_sim}; mkdir -p "$OUT"
 python3 tb/integration/gen_prog.py >/dev/null
 CORE="rtl/cpu/decoder.sv rtl/cpu/imm_gen.sv rtl/cpu/alu.sv rtl/cpu/branch_unit.sv rtl/cpu/mul.sv
       rtl/cpu/div.sv rtl/cpu/div_unit.sv
-      rtl/cache/dm_cache.sv rtl/priv/csr_file.sv rtl/priv/priv_unit.sv rtl/mmu/*.sv rtl/core/core_top.sv"
+      rtl/cache/dm_cache.sv rtl/cache/icache.sv rtl/priv/csr_file.sv rtl/priv/priv_unit.sv rtl/mmu/*.sv rtl/core/core_top.sv"
 SOC="rtl/soc/soc_map_pkg.sv rtl/soc/addr_decode.sv rtl/soc/timer.sv rtl/soc/irq_ctrl.sv rtl/soc/soc_core_top.sv"
 fail=0
 run() { local name=$1 pat=$2; shift 2
