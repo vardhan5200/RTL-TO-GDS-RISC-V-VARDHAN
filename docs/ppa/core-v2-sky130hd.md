@@ -4,6 +4,13 @@ A quick synthesis, floorplan, placement and CTS run in OpenROAD-flow-scripts (OR
 area, timing and power numbers. There is no global or detailed routing, so the timing and power
 below use placement-estimated parasitics.
 
+> **Stale numbers.** This report was measured on `53f6ec9`, before the I-cache (`feat/icache-v2`)
+> and the PPA branches (`feat/ppa-alu-regfile`, `feat/ppa-pipeline`) were merged, and with the
+> since-removed `split_async_flush.py` workaround. Its area, power and timing numbers need a
+> re-run on the current `integrate/core-v2`. The flow now lives in `syn/orfs/` (the former
+> `flow/` directory was merged into it); its default clock is 10 ns, so use
+> `CLK_PERIOD_NS=20` to reproduce the 50 MHz setup below.
+
 | | |
 |---|---|
 | RTL commit | `53f6ec9` (`integrate/core-v2`) |
@@ -12,7 +19,7 @@ below use placement-estimated parasitics.
 | Clock target | 20 ns (50 MHz) on `clk`. I/O delays are 20 % of the period (4 ns in, 4 ns out) |
 | Floorplan | `CORE_UTILIZATION = 40`, aspect ratio 1, `PLACE_DENSITY = 0.60` |
 | Tools | `openroad/orfs:latest` image (digest `sha256:b0f9cd13…`, built 2026-10-19), Yosys 0.68+post with the built-in slang SV front end (`SYNTH_HDL_FRONTEND = slang`), OpenROAD from the same image (it reports its version as "unknown") |
-| Flow | `synth`, `floorplan`, `place`, `cts`, then `flow/sky130hd/ppa_report.tcl` (STA and power on `4_cts.odb`, `estimate_parasitics -placement`, propagated clocks) |
+| Flow | `synth`, `floorplan`, `place`, `cts`, then `ppa_report.tcl` (now `syn/orfs/ppa_report.tcl`) (STA and power on `4_cts.odb`, `estimate_parasitics -placement`, propagated clocks) |
 
 ## What was synthesized
 
@@ -48,12 +55,13 @@ synthesized here. Icarus simulates this fine, but both Yosys front ends reject i
 * yosys-slang: `rtl/core/core_top.sv:117:9: error: condition cannot be matched to any signal from the event list` (the same error at `:185:9`)
 * Yosys `read_verilog -sv`: `ERROR: Multiple edge sensitive events found for this signal!`
 
-The RTL was **not changed**. For this run, `flow/sky130hd/split_async_flush.py` makes a
+The RTL was **not changed** at the time. For this run, a `split_async_flush.py` script (since removed) made a
 synthesis-only copy of `rtl/` in the work directory. In that copy, each of those blocks is
 rewritten into the equivalent `if (!rst_n) <reset> else if (flush) <same values> else ...`
 (async reset plus a synchronous flush, which is what the original code does in simulation). The
-full `make test` regression passes on that rewritten copy. The proper fix is to make the same
-change in the RTL. After that, the script can be removed.
+full `make test` regression passes on that rewritten copy. *Update:* the two `core_top.sv` blocks
+have since been split in the RTL itself, so `core_top` now synthesizes as-is and the script was
+removed. The standalone `rtl/pipeline/*` files (not synthesized) still use the combined form.
 
 ## Results
 
@@ -150,8 +158,10 @@ parasitics are placement-estimated. Treat these as rough relative numbers. The f
   4 ns + 4 ns I/O budget. With a real synchronous SRAM, the pipeline would need a registered
   memory interface.
 * The numbers are for the synthesis-only rewritten copy of `rtl/` described above (the
-  `async reset || flush` blocks are split). The RTL in the repo does not elaborate in Yosys as-is.
-* The I-cache (`feat/icache`) is not part of `integrate/core-v2`, so it is not included.
+  `async reset || flush` blocks are split). At `53f6ec9` the RTL did not elaborate in Yosys as-is
+  (fixed since).
+* The I-cache was not yet part of `integrate/core-v2` at `53f6ec9`, so it is not included
+  (it is now: `feat/icache-v2`, in the current `syn/orfs` file list).
 
 ## Reproduce
 
@@ -159,11 +169,11 @@ Run inside the `openroad/orfs` image (or any ORFS install with Yosys 0.67+ / `re
 
 ```sh
 cd <repo>
-WORK_HOME=/tmp/riscv_ppa flow/sky130hd/run_ppa.sh base synth floorplan place cts
-make -C $ORFS/flow DESIGN_CONFIG=$PWD/flow/sky130hd/config.mk FLOW_VARIANT=base \
-     WORK_HOME=/tmp/riscv_ppa RISCV_RTL=/tmp/riscv_ppa/synth_rtl \
-     RUN_SCRIPT=$PWD/flow/sky130hd/ppa_report.tcl PPA_STAGE=4_cts run
-# FLOW_VARIANT / first argument "mmu" for USE_MMU=1
+# full run (synth, floorplan, place, cts) + post-CTS PPA report, 50 MHz as in this report
+CLK_PERIOD_NS=20 FLOW_VARIANT=base syn/orfs/run.sh $PWD/rtl /tmp/riscv_ppa
+# report only, on an existing run
+CLK_PERIOD_NS=20 FLOW_VARIANT=base syn/orfs/report_only.sh $PWD/rtl /tmp/riscv_ppa
+# FLOW_VARIANT=mmu for USE_MMU=1
 ```
 
 The generated outputs (netlists, ODB, logs) stay in `WORK_HOME` and are not committed.

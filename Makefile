@@ -1,12 +1,13 @@
 # Regression entry points (Icarus Verilog, iverilog -g2012 + vvp).
 #   make test   - everything below
+#   make test-ppa-check - ALU equivalence + MUL random vectors (needs yosys too)
 SIM_OUT ?= /tmp/riscv_sim
 IV      := iverilog -g2012
 export SIM_OUT
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
-.PHONY: test test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration
+.PHONY: test test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration test-ppa-check
 
 test: test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration
 	@echo "== make test: all suites passed"
@@ -52,3 +53,8 @@ test-soc:
 
 test-integration:
 	bash tb/integration/run.sh
+
+# PPA refactor checks: ALU formal equivalence vs 53f6ec9 (yosys SAT) + MUL random vectors.
+test-ppa-check:
+	@r=$$(SIM_OUT=$(SIM_OUT)/ppa_checks bash tb/ppa/run_ppa_checks.sh); echo "$$r"; \
+	  echo "$$r" | grep -q "ALU EQUIV: PASS" && echo "$$r" | grep -q "MUL_RAND: ALL TESTS PASSED"

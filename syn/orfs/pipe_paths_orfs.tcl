@@ -17,3 +17,4 @@ grp div       {u_div/*}
 grp dcache    {u_dcache/*}
 grp csr       {u_priv/*}
 grp lsu       {lsu_st* mul_wait* div_wait* paddr_q* mmu_fault*}
+grp icache    {*u_icache/*}

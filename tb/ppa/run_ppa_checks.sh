@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PPA refactor checks (not part of `make test`):
+# PPA refactor checks (`make test-ppa-check`):
 #   1. formal equivalence (yosys miter + SAT) of rtl/cpu/alu.sv vs BASE's ALU
 #   2. random MUL vectors (Icarus)
 #   3. yosys generic synth cell/FF counts for alu, regfile, mul, div, div_unit
