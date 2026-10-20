@@ -34,5 +34,10 @@ module div_unit (
     div u_div (.clk, .rst_n, .start(start && !busy), .dividend(ua), .divisor(ub),
                .quotient(q), .remainder(r), .done);
 
-    assign result = want_rem ? (neg_r ? -r : r) : (neg_q ? -q : q);
+    // one output negator: select quotient/remainder first, then fix the sign
+    logic [31:0] sel;
+    logic        neg;
+    assign sel    = want_rem ? r : q;
+    assign neg    = want_rem ? neg_r : neg_q;
+    assign result = neg ? -sel : sel;
 endmodule

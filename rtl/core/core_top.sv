@@ -157,7 +157,9 @@ module core_top #(
     logic        bubble_id, fault_id;
     logic [3:0]  fcause_id;
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            instr_id <= NOP; pc_id <= 32'h0; bubble_id <= 1; fault_id <= 0; fcause_id <= 4'd0;
+        end else if (flush) begin   // synchronous squash (kept out of the async-reset term)
             instr_id <= NOP; pc_id <= 32'h0; bubble_id <= 1; fault_id <= 0; fcause_id <= 4'd0;
         end else if (!stall && if_valid) begin
             instr_id <= if_instr; pc_id <= pc; bubble_id <= 0;
@@ -202,7 +204,7 @@ module core_top #(
     assign valid_id = !bubble_id;
     assign ok_id    = !illegal_id || is_mul_id || is_div_id;   // side effects allowed
 
-    logic [31:0] regs [0:31];
+    logic [31:0] regs [1:31];   // x0 is hard-wired: no storage
     logic        ex_wen;
     logic [4:0]  rd_ex;
     logic [31:0] ex_result, rd1_id, rd2_id;
@@ -225,7 +227,14 @@ module core_top #(
     logic [6:0]  opcode_ex;
     logic [1:0]  wb_sel_ex;
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            valid_ex <= 0; reg_write_ex <= 0; alu_src_b_ex <= 0;
+            branch_ex <= 0; jump_ex <= 0; jalr_ex <= 0; is_mul_ex <= 0; is_div_ex <= 0;
+            mem_read_ex <= 0; mem_write_ex <= 0; instr_ex <= NOP;
+            fault_ex <= 0; fcause_ex <= 4'd0;
+            pc_ex <= 0; rd1_ex <= 0; rd2_ex <= 0; imm_ex <= 0;
+            alu_op_ex <= 0; funct3_ex <= 0; opcode_ex <= 0; wb_sel_ex <= 0; rd_ex <= 0;
+        end else if (flush) begin   // synchronous squash (kept out of the async-reset term)
             valid_ex <= 0; reg_write_ex <= 0; alu_src_b_ex <= 0;
             branch_ex <= 0; jump_ex <= 0; jalr_ex <= 0; is_mul_ex <= 0; is_div_ex <= 0;
             mem_read_ex <= 0; mem_write_ex <= 0; instr_ex <= NOP;
@@ -349,8 +358,13 @@ module core_top #(
     logic div_start, div_done;
     logic [31:0] div_result;
     assign div_start = valid_ex && is_div_ex && !div_wait && !p_trap;
+    // Operand isolation: div_unit's input negators / zero check are
+    // combinational on a/b, so feed them zeros unless a DIV is in EX.
+    logic [31:0] div_a, div_b;
+    assign div_a = rd1_ex & {32{is_div_ex}};
+    assign div_b = rd2_ex & {32{is_div_ex}};
     div_unit u_div (.clk, .rst_n, .start(div_start), .op(funct3_ex[1:0]),
-                    .a(rd1_ex), .b(rd2_ex), .result(div_result), .done(div_done));
+                    .a(div_a), .b(div_b), .result(div_result), .done(div_done));
     always_ff @(posedge clk or negedge rst_n)
         if (!rst_n)         div_wait <= 0;
         else if (div_start) div_wait <= 1;
@@ -578,7 +592,7 @@ module core_top #(
     assign retire = valid_ex && !stall && !p_trap;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            for (int i = 0; i < 32; i++) regs[i] <= 32'h0;
+            for (int i = 1; i < 32; i++) regs[i] <= 32'h0;
         end else if (ex_wen) begin
             regs[rd_ex] <= ex_result;
         end
