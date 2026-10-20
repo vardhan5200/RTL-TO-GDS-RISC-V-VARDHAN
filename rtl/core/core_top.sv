@@ -114,7 +114,9 @@ module core_top #(
     logic        bubble_id, fault_id;
     logic [3:0]  fcause_id;
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            instr_id <= NOP; pc_id <= 32'h0; bubble_id <= 1; fault_id <= 0; fcause_id <= 4'd0;
+        end else if (flush) begin   // synchronous squash (kept out of the async reset term)
             instr_id <= NOP; pc_id <= 32'h0; bubble_id <= 1; fault_id <= 0; fcause_id <= 4'd0;
         end else if (!stall && if_valid) begin
             instr_id <= if_instr; pc_id <= pc; bubble_id <= 0;
@@ -182,7 +184,14 @@ module core_top #(
     logic [6:0]  opcode_ex;
     logic [1:0]  wb_sel_ex;
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            valid_ex <= 0; reg_write_ex <= 0; alu_src_b_ex <= 0;
+            branch_ex <= 0; jump_ex <= 0; jalr_ex <= 0; is_mul_ex <= 0; is_div_ex <= 0;
+            mem_read_ex <= 0; mem_write_ex <= 0; instr_ex <= NOP;
+            fault_ex <= 0; fcause_ex <= 4'd0;
+            pc_ex <= 0; rd1_ex <= 0; rd2_ex <= 0; imm_ex <= 0;
+            alu_op_ex <= 0; funct3_ex <= 0; opcode_ex <= 0; wb_sel_ex <= 0; rd_ex <= 0;
+        end else if (flush) begin   // synchronous bubble
             valid_ex <= 0; reg_write_ex <= 0; alu_src_b_ex <= 0;
             branch_ex <= 0; jump_ex <= 0; jalr_ex <= 0; is_mul_ex <= 0; is_div_ex <= 0;
             mem_read_ex <= 0; mem_write_ex <= 0; instr_ex <= NOP;
