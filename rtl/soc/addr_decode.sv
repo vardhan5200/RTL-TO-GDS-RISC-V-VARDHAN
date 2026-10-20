@@ -12,6 +12,8 @@ module addr_decode (
     output logic        done_sel,
     output logic        timer_sel,
     output logic        irq_sel,
+    output logic        uartb_sel,   // UART register block (0x230)
+    output logic        mem_sel,     // main RAM (0x1_0000)
     output logic        unmapped
 );
     function automatic logic in_range(input logic [31:0] a, base, size);
@@ -26,7 +28,9 @@ module addr_decode (
         done_sel  = (addr[31:2] == DONE_ADDR[31:2]);
         timer_sel = in_range(addr, TIMER_BASE, TIMER_SIZE);
         irq_sel   = in_range(addr, IRQ_BASE,   IRQ_SIZE);
+        uartb_sel = in_range(addr, UART_BASE,  UART_SIZE);
+        mem_sel   = in_range(addr, MEM_BASE,   MEM_SIZE);
         unmapped  = !(rom_sel | sram_sel | uart_sel | gpio_sel |
-                      done_sel | timer_sel | irq_sel);
+                      done_sel | timer_sel | irq_sel | uartb_sel | mem_sel);
     end
 endmodule

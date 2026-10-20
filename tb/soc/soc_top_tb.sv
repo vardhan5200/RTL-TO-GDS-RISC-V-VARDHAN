@@ -25,14 +25,15 @@ module soc_top_tb;
 
     // ---- standalone decoder sweep ----
     logic [31:0] da;
-    logic s_rom, s_sram, s_uart, s_gpio, s_done, s_tmr, s_irq, s_un;
+    logic s_rom, s_sram, s_uart, s_gpio, s_done, s_tmr, s_irq, s_uartb, s_mem, s_un;
     addr_decode u_chk (.addr(da), .rom_sel(s_rom), .sram_sel(s_sram),
         .uart_sel(s_uart), .gpio_sel(s_gpio), .done_sel(s_done),
-        .timer_sel(s_tmr), .irq_sel(s_irq), .unmapped(s_un));
-    task automatic dec(logic [31:0] a, logic [7:0] exp);
+        .timer_sel(s_tmr), .irq_sel(s_irq), .uartb_sel(s_uartb), .mem_sel(s_mem),
+        .unmapped(s_un));
+    task automatic dec(logic [31:0] a, logic [9:0] exp);
         da = a; #1;
         check($sformatf("decode %08h", a),
-              {s_rom, s_sram, s_uart, s_gpio, s_done, s_tmr, s_irq, s_un}, exp);
+              {s_rom, s_sram, s_uart, s_gpio, s_done, s_tmr, s_irq, s_uartb, s_mem, s_un}, exp);
     endtask
 
     bit saw_irq = 0, saw_err_early = 0;
@@ -45,16 +46,19 @@ module soc_top_tb;
     end
 
     initial begin
-        // bits: rom sram uart gpio done timer irq unmapped
+        // bits: rom sram uart gpio done timer irq uartblk mem unmapped
         $display("soc_top_tb: decoder sweep");
-        dec(32'h0000_0000, 8'b1000_0000); dec(32'h0000_00FC, 8'b1000_0000);
-        dec(32'h0000_0100, 8'b0100_0000); dec(32'h0000_01FC, 8'b0100_0000);
-        dec(32'h0000_0200, 8'b0010_0000); dec(32'h0000_0204, 8'b0001_0000);
-        dec(32'h0000_0208, 8'b0000_1000); dec(32'h0000_020C, 8'b0000_0001);
-        dec(32'h0000_0210, 8'b0000_0100); dec(32'h0000_021C, 8'b0000_0100);
-        dec(32'h0000_0220, 8'b0000_0010); dec(32'h0000_022C, 8'b0000_0010);
-        dec(32'h0000_0230, 8'b0000_0001); dec(32'h0000_0300, 8'b0000_0001);
-        dec(32'h1000_0000, 8'b0000_0001); dec(32'hFFFF_FFFC, 8'b0000_0001);
+        dec(32'h0000_0000, 10'b1000_0000_00); dec(32'h0000_00FC, 10'b1000_0000_00);
+        dec(32'h0000_0100, 10'b0100_0000_00); dec(32'h0000_01FC, 10'b0100_0000_00);
+        dec(32'h0000_0200, 10'b0010_0000_00); dec(32'h0000_0204, 10'b0001_0000_00);
+        dec(32'h0000_0208, 10'b0000_1000_00); dec(32'h0000_020C, 10'b0000_0000_01);
+        dec(32'h0000_0210, 10'b0000_0100_00); dec(32'h0000_021C, 10'b0000_0100_00);
+        dec(32'h0000_0220, 10'b0000_0010_00); dec(32'h0000_022C, 10'b0000_0010_00);
+        dec(32'h0000_0230, 10'b0000_0001_00); dec(32'h0000_023C, 10'b0000_0001_00);
+        dec(32'h0000_0240, 10'b0000_0000_01); dec(32'h0000_0300, 10'b0000_0000_01);
+        dec(32'h0000_FFFC, 10'b0000_0000_01); dec(32'h0001_0000, 10'b0000_0000_10);
+        dec(32'h0001_FFFC, 10'b0000_0000_10); dec(32'h0002_0000, 10'b0000_0000_01);
+        dec(32'h1000_0000, 10'b0000_0000_01); dec(32'hFFFF_FFFC, 10'b0000_0000_01);
     end
 
     initial begin
