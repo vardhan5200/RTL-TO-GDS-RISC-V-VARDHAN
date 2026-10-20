@@ -85,7 +85,7 @@ module priv_unit_tb;
         step(csr_i(RW, 5'd0, 5'd2, 12'h341), 0, 32'h0000_1237);   // mepc low bits drop
         rdcsr(12'h341, v); check("mepc align", v, 32'h1234);
         step(csr_i(RW, 5'd0, 5'd2, 12'h304), 0, 32'hFFFF_FFFF);
-        rdcsr(12'h304, v); check("mie WARL mask", v, 32'h888);
+        rdcsr(12'h304, v); check("mie WARL mask (M+S bits)", v, 32'hAAA);
         step(csr_i(RW, 5'd0, 5'd0, 12'h304), 0);                  // mie = 0
         rdcsr(12'hB00, v); check("mcycle running", v > 0, 1);
         rdcsr(12'hC02, v); check("instret alias nonzero", v > 0, 1);

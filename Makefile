@@ -42,7 +42,7 @@ test-cache:
 	  grep -q "ALL PASS" $(SIM_OUT)/$$t$$ic.log || exit 1; done; done
 
 test-priv:
-	bash tb/priv/run.sh | grep -E "^(CORE )?PRIV"
+	bash tb/priv/run.sh | grep -E "^(CORE )?(PRIV|SMODE)"
 
 test-mmu:
 	sh tb/mmu/run.sh | grep -E "^MMU: ALL TESTS PASSED"
