@@ -14,6 +14,14 @@ A single-core core capable of running a minimal nginx-style benchmark (tiny bare
 
 ## Current status (`integrate/core-v1` @ `aa8cbde`)
 
+> **Snapshot, now out of date on `integrate/core-v2`.** This table was checked against
+> `integrate/core-v1` @ `aa8cbde`. Since then `integrate/core-v2` has merged `feat/satp`
+> (with DIV/REM and MMU page-fault traps), `feat/ifetch-mmu`, `feat/priv-modes`,
+> `feat/icache-v2`, `feat/fetch-priv-sfence`, `feat/s-mode-csrs`, `feat/soc-software-ready`
+> (UART, main RAM, `sw/nginx_lite`), `feat/ppa-alu-regfile`, `feat/ppa-pipeline` and
+> `feat/soc-timer-irq`, so rows marked *unmerged* / **No** for those features are stale.
+> The sky130hd flow for `core_top` is in `syn/orfs/` (see `docs/ppa/core-v2-sky130hd.md`).
+
 Every "Yes" row was verified by running `make test` on this commit; all suites pass. "Unmerged branch" rows were verified by running `make test` on that branch.
 
 | Feature | In `integrate/core-v1`? | Evidence / notes |

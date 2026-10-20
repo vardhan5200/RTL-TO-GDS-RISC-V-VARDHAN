@@ -1,5 +1,13 @@
 # Architecture (as built)
 
+> **Snapshot, now out of date on `integrate/core-v2`.** This file was checked against
+> `integrate/core-v1` @ `aa8cbde`. Since then `integrate/core-v2` has merged `feat/satp`
+> (with DIV/REM and MMU page-fault traps), `feat/ifetch-mmu`, `feat/priv-modes`,
+> `feat/icache-v2`, `feat/fetch-priv-sfence`, `feat/s-mode-csrs`, `feat/soc-software-ready`
+> (UART, main RAM, `sw/nginx_lite`), `feat/ppa-alu-regfile`, `feat/ppa-pipeline` and
+> `feat/soc-timer-irq`, so rows marked *unmerged* / **No** for those features are stale.
+> The sky130hd flow for `core_top` is in `syn/orfs/` (see `docs/ppa/core-v2-sky130hd.md`).
+
 This file describes what is implemented on `integrate/core-v1` @ `aa8cbde`. The original Phase 0 target design (5-stage pipeline, split I/D caches, ready/valid interconnect) is in [`docs/architecture.md`](docs/architecture.md). For the as-built address map and peripheral registers, see [`docs/memory_map.md`](docs/memory_map.md). Features that exist only on unmerged branches are marked *(unmerged)*.
 
 ```
