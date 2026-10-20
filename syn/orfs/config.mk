@@ -10,7 +10,7 @@ export VERILOG_FILES = \
 	$(RISCV_RTL)/core/core_top.sv $(RISCV_RTL)/cpu/decoder.sv $(RISCV_RTL)/cpu/imm_gen.sv \
 	$(RISCV_RTL)/cpu/alu.sv $(RISCV_RTL)/cpu/branch_unit.sv $(RISCV_RTL)/cpu/mul.sv \
 	$(RISCV_RTL)/cpu/div.sv $(RISCV_RTL)/cpu/div_unit.sv $(RISCV_RTL)/priv/csr_file.sv \
-	$(RISCV_RTL)/priv/priv_unit.sv $(RISCV_RTL)/cache/dm_cache.sv $(RISCV_RTL)/mmu/sv32_tlb.sv \
+	$(RISCV_RTL)/priv/priv_unit.sv $(RISCV_RTL)/cache/dm_cache.sv $(RISCV_RTL)/cache/icache.sv $(RISCV_RTL)/mmu/sv32_tlb.sv \
 	$(RISCV_RTL)/mmu/sv32_perm_check.sv $(RISCV_RTL)/mmu/sv32_ptw.sv $(RISCV_RTL)/mmu/sv32_mmu.sv
 export SDC_FILE = $(RISCV_CFG_DIR)/constraint.sdc
 export SYNTH_HDL_FRONTEND = slang

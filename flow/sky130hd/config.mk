@@ -27,7 +27,7 @@ export VERILOG_FILES = \
 	$(RISCV_RTL)/cpu/div_unit.sv \
 	$(RISCV_RTL)/priv/csr_file.sv \
 	$(RISCV_RTL)/priv/priv_unit.sv \
-	$(RISCV_RTL)/cache/dm_cache.sv \
+	$(RISCV_RTL)/cache/dm_cache.sv $(RISCV_RTL)/cache/icache.sv \
 	$(RISCV_RTL)/mmu/sv32_tlb.sv \
 	$(RISCV_RTL)/mmu/sv32_perm_check.sv \
 	$(RISCV_RTL)/mmu/sv32_ptw.sv \
