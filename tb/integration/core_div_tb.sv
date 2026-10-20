@@ -25,7 +25,7 @@ module core_div_tb;
         .clk, .rst_n, .imem_addr, .imem_rdata,
         .dmem_re, .dmem_we, .dmem_addr, .dmem_wdata, .dmem_wstrb, .dmem_rdata,
         .meip(1'b0), .mtip(1'b0), .msip(1'b0),
-        .priv_mode(2'b11), .mmu_fault);
+        .mmu_fault);
 
     int cycles = 0, divs = 0, traps = 0, div_stall = 0;
     always @(posedge clk) if (rst_n) begin

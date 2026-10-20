@@ -10,32 +10,34 @@
 //     (hardware present). satp comes from the satp CSR (0x180, csr_file):
 //     software writes it with CSRW; MODE=0 -> Bare (PA = VA), MODE=1 -> Sv32
 //     translation with the root table at PPN<<12. Every committed satp write
-//     flushes both TLBs (no ASIDs; there is no SFENCE.VMA instruction yet).
-//     Privilege modes M/S/U live in priv_unit (cur_priv, exported). The D-MMU
-//     uses the effective data-access privilege: cur_priv, or mstatus.MPP when
-//     cur_priv == M and mstatus.MPRV == 1. M is never translated; S/U are
+//     flushes both TLBs (no ASIDs). SFENCE.VMA (any rs1/rs2, flush all) does
+//     the same: both TLBs, the fetch translation register and the pipeline.
+//     Privilege modes M/S/U live in priv_unit (cur_priv, exported); there is
+//     no testbench override any more. M is never translated; S/U are
 //     translated when satp.MODE = Sv32, with the PTE U-bit check (U-mode only
-//     U=1 pages; S-mode not U=1 pages unless mstatus.SUM) and mstatus.MXR.
-//     priv_mode port (bring-up / test override, kept for older tests):
-//     2'b11 -> use the architectural effective privilege for data accesses;
-//     2'b00 / 2'b01 -> force U / S for data accesses regardless of cur_priv.
-//     The I-MMU (fetch) is still driven by priv_mode only: 2'b11 -> Bare fetch;
-//     2'b01 (S) -> satp decides.
+//     U=1 pages; S-mode not U=1 pages unless mstatus.SUM for data; never U=1
+//     pages for fetch).
+//       fetch (I-MMU): cur_priv (MPRV does not apply to fetch).
+//       data  (D-MMU): effective data privilege = mstatus.MPP when
+//                      cur_priv == M and mstatus.MPRV == 1, else cur_priv;
+//                      SUM/MXR from mstatus.
+//     cur_priv only changes on a trap or MRET, which redirect fetch and clear
+//     the fetch translation register, so the redirect target is fetched with
+//     the new privilege.
 //     With USE_MMU=0 satp is still a read/write CSR but has no effect.
 //     MMU faults raise a precise synchronous
 //     exception through priv_unit (xcpt_*): mcause = load/store page fault
 //     13/15 (or access fault 5/7), mtval = faulting VA, mepc = pc of the
 //     load/store. The access is squashed (no rd write, store never reaches the
 //     bus/cache), younger instructions are flushed and fetch jumps to mtvec.
-//     mmu_fault stays as a sticky status flag. (No I-side MMU, so instruction
-//     page faults (12) cannot occur yet.)
+//     mmu_fault stays as a sticky status flag (data side only).
 //   * MUL (rtl/cpu/mul.sv) and DIV/DIVU/REM/REMU (rtl/cpu/div_unit.sv around
 //     rtl/cpu/div.sv) in EX: one start pulse, IF/ID/EX stall until done, the
 //     result is written back and forwarded to ID on the done cycle.
 //     DIV latency: 33 cycles in EX (32 iterations + start), i.e. 32 stall cycles.
 // Instruction side: imem is read combinationally (no I-cache in this branch).
 // With USE_MMU=1 fetch is translated by a second sv32_mmu instance (I-MMU,
-// own 4-entry I-TLB, req_acc=fetch) whenever satp.MODE=1 and priv_mode is not
+// own 4-entry I-TLB, req_acc=fetch) whenever satp.MODE=1 and cur_priv is not
 // M (same rule as the data side). A 1-entry fetch translation register (last
 // VPN -> PPN / fault) lets sequential fetches in a page run at 1 IPC; on a miss
 // the PC holds, a bubble enters ID and the I-MMU translates (TLB hit: 1 cycle,
@@ -45,7 +47,7 @@
 // NOP) and raised through priv_unit's xcpt_* port only when it reaches EX, so
 // older instructions complete first and wrong-path fetch faults are flushed
 // with the instruction. mtval = mepc = faulting virtual PC. The fetch
-// translation register is cleared on satp writes and on every trap/mret.
+// translation register is cleared on satp writes, SFENCE.VMA and every trap/mret.
 // A satp write also flushes both TLBs and the pipeline (refetch at pc+4 under
 // the new translation).
 // Data-bus arbitration with the I-side walker: the data side (older
@@ -70,7 +72,6 @@ module core_top #(
     output logic [3:0]  dmem_wstrb,
     input  logic [31:0] dmem_rdata,
     input  logic        meip, mtip, msip,
-    input  logic [1:0]  priv_mode,     // 2'b11 = architectural; U/S = forced MMU privilege
     output logic        mmu_fault,
     output logic [1:0]  cur_priv       // current privilege mode (00 U, 01 S, 11 M)
 );
@@ -101,7 +102,7 @@ module core_top #(
         if (!rst_n)                             pc <= 32'h0;
         else if (!stall && (if_valid || flush)) pc <= next_pc;
 
-    assign i_bare    = !USE_MMU || !csr_satp[31] || (priv_mode == 2'b11);
+    assign i_bare    = !USE_MMU || !csr_satp[31] || (cur_priv == 2'b11);
     assign ifx_hit   = ifx_valid && (ifx_vpn == pc[31:12]);
     assign if_paddr  = {ifx_ppn, pc[11:0]};
     assign imem_addr = i_bare ? pc : if_paddr[31:0];
@@ -229,6 +230,7 @@ module core_top #(
     // ---- privileged unit at the commit point ----
     logic        mul_wait, div_wait, ex_first;
     logic        p_rd_we, p_trap, p_irq, p_mret;
+    logic        p_sfence;     // SFENCE.VMA committed
     logic [31:0] p_rd_wdata, p_redirect_pc, p_cause;
     logic        mmu_xcpt;     // MMU fault on the EX load/store (defined in the LSU)
     // Declared here (before priv_unit uses them); driven in the LSU section below.
@@ -264,20 +266,24 @@ module core_top #(
         .trap(p_trap), .irq_taken(p_irq), .mret(p_mret), .cause_o(p_cause),
         .satp_o(csr_satp), .satp_wr_o(csr_satp_wr),
         .cur_priv(cur_priv), .mstatus_mpp(st_mpp), .mstatus_mprv(st_mprv),
-        .mstatus_sum(st_sum), .mstatus_mxr(st_mxr));
+        .mstatus_sum(st_sum), .mstatus_mxr(st_mxr), .sfence(p_sfence));
 
     // Effective privilege for data accesses (MPRV: loads/stores use MPP in M)
-    logic [1:0] eff_priv, mmu_priv;
+    logic [1:0] eff_priv;
     assign eff_priv = (cur_priv == 2'b11 && st_mprv) ? st_mpp : cur_priv;
-    assign mmu_priv = (priv_mode != 2'b11) ? priv_mode : eff_priv;
 
-    logic br_flush, satp_flush;
+    // satp write or SFENCE.VMA: flush both TLBs (flush all, rs1/rs2 ignored)
+    logic tlb_flush;
+    assign tlb_flush = csr_satp_wr || p_sfence;
+
+    logic br_flush, vm_flush;
     assign br_flush    = valid_ex && !p_trap && (bu_taken || jalr_ex);
-    // satp write: refetch the following instructions under the new translation
-    assign satp_flush  = USE_MMU && csr_satp_wr && !p_trap;
-    assign flush       = p_redirect || br_flush || satp_flush;
+    // satp write / SFENCE.VMA: refetch the following instructions under the
+    // new translation
+    assign vm_flush    = USE_MMU && tlb_flush && !p_trap;
+    assign flush       = p_redirect || br_flush || vm_flush;
     assign redirect_pc = p_redirect ? p_redirect_pc :
-                         satp_flush ? (pc_ex + 32'd4) :
+                         vm_flush   ? (pc_ex + 32'd4) :
                          jalr_ex    ? ((rd1_ex + imm_ex) & ~32'h1) : bu_target;
     assign next_pc     = flush ? redirect_pc : pc + 32'd4;
 
@@ -360,7 +366,7 @@ module core_top #(
     assign mmu_req_valid = USE_MMU && mem_op && lsu_st == L_IDLE && !i_inflight;
 
     // ---- fetch translation register / I-MMU request ----
-    assign i_inval = csr_satp_wr || p_redirect;
+    assign i_inval = tlb_flush || p_redirect;   // satp / sfence / trap / mret (priv change)
     // Start a fetch translation only when no load/store is in EX (the older
     // data access has priority on the shared bus) and fetch is not being
     // redirected this cycle.
@@ -437,7 +443,7 @@ module core_top #(
     generate if (USE_MMU) begin : g_mmu
         sv32_mmu #(.TLB_ENTRIES(4)) u_mmu (
             .clk, .rst_n,
-            .satp(csr_satp), .priv(mmu_priv), .sum(st_sum), .mxr(st_mxr), .flush(csr_satp_wr),
+            .satp(csr_satp), .priv(eff_priv), .sum(st_sum), .mxr(st_mxr), .flush(tlb_flush),
             .req_valid(mmu_req_valid), .req_ready(mmu_req_ready),
             .req_vaddr(vaddr), .req_acc(mem_write_ex ? 2'd1 : 2'd0),
             .resp_valid(mmu_resp_valid), .resp_ready(lsu_st == L_XLATE),
@@ -458,7 +464,8 @@ module core_top #(
         // I-MMU: fetch translation, own I-TLB, PTE reads on the same bus
         sv32_mmu #(.TLB_ENTRIES(4)) u_immu (
             .clk, .rst_n,
-            .satp(csr_satp), .priv(priv_mode), .sum(1'b0), .mxr(1'b0), .flush(csr_satp_wr),
+            // fetch: cur_priv; SUM/MXR do not affect instruction fetch
+            .satp(csr_satp), .priv(cur_priv), .sum(1'b0), .mxr(1'b0), .flush(tlb_flush),
             .req_valid(immu_req_valid), .req_ready(immu_req_ready),
             .req_vaddr(pc), .req_acc(2'd2),
             .resp_valid(immu_resp_valid), .resp_ready(1'b1),

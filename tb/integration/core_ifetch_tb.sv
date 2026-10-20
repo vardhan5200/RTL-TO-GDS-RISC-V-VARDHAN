@@ -1,9 +1,10 @@
 // core_ifetch_tb.sv — Sv32 instruction-fetch translation and precise
-// instruction page faults on core_top (USE_MMU=1, priv_mode=S from the tb
-// port; the core itself is M-only and M-mode is never translated).
+// instruction page faults on core_top (USE_MMU=1). The program sets satp in
+// M-mode (never translated) and enters S-mode via MRET; the trap handler runs
+// in M (untranslated) and MRETs back to S.
 // Flat 32 KiB memory shared by fetch and data; program image
 // tb/integration/core_ifetch_prog.hex (sparse, see gen_prog.py). The program:
-//   * CSRW satp = 0x80000002, then calls VA 0x1000, which maps to PA 0x5000
+//   * CSRW satp = 0x80000002, MRET to S, then calls VA 0x1000, which maps to PA 0x5000
 //     (code A). PA 0x1000 holds different code (B) that must not run yet.
 //   * jumps to VA 0x4000 (unmapped), VA 0x3000 (mapped RW, no X) and VA 0x5000
 //     (invalid PTE although PA 0x5000 holds code): each gives mcause=12 with
@@ -24,8 +25,8 @@ module core_ifetch_tb;
     logic [3:0]  dmem_wstrb;
     logic [31:0] mem [0:8191];
     // pcs / return addresses printed by gen_prog.py
-    localparam logic [31:0] RA_4000 = 32'h30, RA_3000 = 32'h3C, RA_5000 = 32'h48,
-                            RA_6FF8 = 32'h58, RA_1FF8 = 32'h68;
+    localparam logic [31:0] RA_4000 = 32'h54, RA_3000 = 32'h60, RA_5000 = 32'h6C,
+                            RA_6FF8 = 32'h7C, RA_1FF8 = 32'h8C;
     initial begin
         for (int k = 0; k < 8192; k++) mem[k] = 32'h0000_0013;   // NOPs everywhere
         for (int k = 32'h2000 >> 2; k < (32'h4000 >> 2); k++) mem[k] = 32'h0;  // page tables
@@ -54,7 +55,7 @@ module core_ifetch_tb;
         .clk, .rst_n, .imem_addr, .imem_rdata,
         .dmem_re, .dmem_we, .dmem_addr, .dmem_wdata, .dmem_wstrb, .dmem_rdata,
         .meip(1'b0), .mtip(1'b0), .msip(1'b0),
-        .priv_mode(2'b01), .mmu_fault);
+        .mmu_fault);
 
     // monitors
     int ipte_reads = 0, fetch_pa5 = 0, fetch_pa1_xlate = 0, wrongpath_fault_id = 0, traps = 0;
