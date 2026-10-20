@@ -12,7 +12,11 @@ Everything lives in the low 4 KiB so programs can reach every register with
 `x0 + imm12` (e.g. `sw x1, 0x200(x0)`). ROM/SRAM/UART/GPIO/DONE addresses are
 unchanged from `soc.sv`; Timer and IRQ controller are new. The UART register
 block (`0x230`) and the 64 KiB main RAM (`0x0001_0000`, for C programs) were
-added for software bring-up; every older address is unchanged.
+added for software bring-up; every older address is unchanged. Both SoC tops
+use the same map: `soc_top` (single-cycle CPU, no interrupts) and
+`soc_core_top` (integrated pipelined core with I-/D-cache + priv unit; ROM+SRAM below
+`0x200` are cacheable, peripherals are uncached). In `soc_core_top` the
+irq controller output drives the core's machine external interrupt (§6).
 
 | Address range               | Block          | Size      | Access     | Notes                                         |
 |-----------------------------|----------------|-----------|------------|-----------------------------------------------|
@@ -143,22 +147,49 @@ GPIO is OUT-only at `0x204` (planned IN/DIR registers deferred).
 - Conflicting or overlapping ranges are not permitted.
 - The linker script, boot ROM image, and RTL address decoder must agree.
 - Tests: `tb/soc/run.sh` (irq_ctrl unit test, timer→irq test, soc_top
-  decode/timer-irq/bus-error test, UART unit test, and `soc_sw_tb`: the C
-  program `sw/nginx_lite` on `soc_core_top` talking over the serial UART).
+  decode/timer-irq/bus-error test, UART unit test, `soc_sw_tb`: the C
+  program `sw/nginx_lite` on `soc_core_top` talking over the serial UART, and
+  `soc_timer_irq_tb`: timer interrupt taken by the integrated core through
+  MEI, handler + mret, no re-entry).
 
-## 6. CPU interrupt hookup (not yet implemented)
+## 6. CPU interrupt hookup (machine external interrupt)
 
-`single_cycle_cpu` / the pipeline have no CSR or trap support, so `soc_top`
-only exposes `irq` as an output. To take interrupts the CPU needs:
-- An `irq` input (machine external interrupt, mip.MEIP = `irq`).
-- CSRs `mstatus` (MIE/MPIE), `mie` (MEIE), `mip`, `mtvec`, `mepc`, `mcause`
-  and the `csrrw/csrrs/csrrc[i]` instructions (SYSTEM opcode is currently
-  decoded as a no-op).
-- Trap entry when `mstatus.MIE && mie.MEIE && irq`: `mepc <= pc` of the next
-  un-retired instruction, `mcause <= 0x8000_000B`, `MPIE <= MIE`, `MIE <= 0`,
-  `pc <= mtvec`; in the pipeline, flush younger stages first.
-- `mret`: `pc <= mepc`, `MIE <= MPIE`.
-- Export `mem_read` on the data port (`soc_top` currently infers loads from the
-  opcode to flag unmapped reads) and optionally take `bus_err` as a load/store
-  access-fault exception.
+`soc_top` (single-cycle CPU) has no trap support and only exposes `irq` as an
+output. `soc_core_top` connects it to the integrated core:
 
+```
+timer.STATUS[0] (match) --src[0]--> irq_ctrl PENDING[0] & ENABLE[0]
+    --> irq_ctrl.irq --> soc_core_top.irq --> core_top.meip
+    --> csr_file mip.MEIP (bit 11) --> priv_unit: trap if mstatus.MIE && mie.MEIE
+```
+
+- `core_top` ports `meip` = `irq_ctrl.irq`; `mtip` and `msip` are tied to 0
+  (the timer is delivered as an *external* interrupt, not as MTI/CLINT).
+- The interrupt is taken at an instruction boundary in EX (commit point):
+  `mepc` = pc of the not-yet-executed instruction, `mcause = 0x8000_000B`,
+  `MPIE <= MIE`, `MIE <= 0`, pc <= `mtvec` (`mtvec[0]=1` vectored: base +
+  4*11). `mret` restores `MIE <= MPIE` and returns to `mepc`.
+- Masking: three levels — irq_ctrl `ENABLE[0]` (per source), `mie.MEIE`
+  (bit 11, `0x800`), `mstatus.MIE` (bit 3).
+
+Software sequence (as in `tb/soc/gen_timer_irq_prog.py`):
+
+```
+setup:   csrw mtvec, handler
+         li   t0, 0x800 ; csrs mie, t0        # MEIE
+         csrsi mstatus, 8                      # MIE
+         sw   1,   0x224(x0)                   # irq_ctrl ENABLE[0] (timer)
+         lw   t1,  0x210(x0) ; addi t1, t1, N
+         sw   t1,  0x214(x0)                   # timer COMPARE = COUNT + N
+handler: csrr t2, mcause                       # 0x8000000B
+         sw   1,   0x21C(x0)                   # timer STATUS W1C  (clear source first)
+         sw   1,   0x228(x0)                   # irq_ctrl ACK[0]
+         mret
+```
+
+Clearing the timer flag before the ACK matters: sources are level-sensitive,
+so ACKing while `STATUS[0]` is still set re-pends immediately and the handler
+re-enters forever (the test checks `irq` is low at every `mret`).
+
+Remaining gaps: no CLINT-style `mtime/mtimecmp` (MTI unused), `bus_err` is
+not reported as an access-fault exception.
