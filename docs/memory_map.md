@@ -29,8 +29,17 @@ irq controller output drives the core's machine external interrupt (§6).
 | `0x0000_0210`–`0x0000_021F` | Timer          | 4 words   | Read/write | See §3.1; irq source 0                         |
 | `0x0000_0220`–`0x0000_022F` | IRQ controller | 4 words   | Read/write | See §3.2; drives SoC `irq` output              |
 | `0x0000_0230`–`0x0000_023F` | UART           | 4 words   | Read/write | See §3.3; serial `uart_tx`/`uart_rx` (8N1)     |
+| `0x0000_0240`–`0x0000_024F` | 7-segment      | 4 words   | Read/write | **`demo_soc` only**, see §3.4                  |
+| `0x0000_0400`–`0x0000_04FF` | matmul4x4      | 64 words  | Read/write | **`demo_soc` only**, see §3.5                  |
 | `0x0001_0000`–`0x0001_FFFF` | Main RAM       | 64 KiB    | R/W/X      | Code + data + stack for C programs; preloaded with `$readmemh`; uncached (`soc_core_top` only) |
 | everything else             | unmapped       | —         | —          | Reads return `0x0000_0000`; sets `bus_err`    |
+
+**`demo_soc` (`rtl/peripherals/demo_soc.sv`).** The demo top keeps every
+address above and decodes the two demo-only regions (`SEG_BASE`,
+`MATMUL_BASE` in `soc_map_pkg.sv`) itself; the shared `addr_decode`,
+`soc_top` and `soc_core_top` do not decode them, so they stay unmapped
+there. `demo_soc` has no timer / irq controller: `0x210`–`0x22F` are
+unmapped in the demo. See `docs/demo_soc.md`.
 
 **Unmapped access handling.** A load or store to an unmapped address, or a
 store to ROM, returns `0x0000_0000` (loads) / is dropped (stores) and sets the
@@ -133,6 +142,29 @@ The RX pop side effect relies on the core issuing exactly one `dmem_re`
 cycle per uncached load (true for `core_top`).
 
 GPIO is OUT-only at `0x204` (planned IN/DIR registers deferred).
+
+### 3.4 7-segment display (`0x0000_0240`, `rtl/peripherals/seven_seg.sv`, demo_soc only)
+Single digit, active-high outputs `seg[6:0]` = `{g,f,e,d,c,b,a}` plus `dp`.
+
+| Offset | Address | Register | Access | Reset  | Description |
+|--------|---------|----------|--------|--------|-------------|
+| 0x0    | `0x240` | VALUE    | R/W    | `0x10` | `[3:0]` hex digit 0–F, `[4]` blank (all segments off), `[7]` decimal point. Any store whose `wstrb[0]` is set (`sb`/`sw` to `0x240`) latches `wdata[7:0]` |
+| 0x4    | `0x244` | SEGS     | R      | 0      | `{24'b0, dp, seg[6:0]}`, the pattern on the pins |
+
+### 3.5 4x4 matrix multiply (`0x0000_0400`, `rtl/peripherals/matmul4x4.sv`, demo_soc only)
+`C = A x B`; A/B elements are 16-bit signed (low half of each word; read back
+sign-extended), C elements 32-bit two's complement (wraps on overflow).
+One multiply-accumulate per cycle: a run takes 64 MAC cycles (CYCLES = 65).
+Word accesses only.
+
+| Offset      | Address         | Register  | Access | Description |
+|-------------|-----------------|-----------|--------|-------------|
+| 0x00–0x3C   | `0x400`–`0x43C` | A[0..15]  | R/W    | row-major, `A[r][c]` at `0x400 + 4*(4r+c)`; writes ignored while BUSY |
+| 0x40–0x7C   | `0x440`–`0x47C` | B[0..15]  | R/W    | row-major; writes ignored while BUSY |
+| 0x80–0xBC   | `0x480`–`0x4BC` | C[0..15]  | R      | row-major, valid when DONE |
+| 0xC0        | `0x4C0`         | CTRL      | W      | bit0 START (ignored while BUSY); reads 0 |
+| 0xC4        | `0x4C4`         | STATUS    | R      | bit0 BUSY, bit1 DONE (cleared by START) |
+| 0xC8        | `0x4C8`         | CYCLES    | R      | cycles taken by the last run |
 
 ## 4. Cache and bus visibility
 
