@@ -11,6 +11,8 @@
 //   0x0000_0210 - 0x0000_021F  Timer         (4 registers)
 //   0x0000_0220 - 0x0000_022F  IRQ controller (4 registers)
 //   0x0000_0230 - 0x0000_023F  UART          (DATA, STATUS, BAUDDIV)
+//   0x0000_0240 - 0x0000_024F  7-segment     (demo_soc only)
+//   0x0000_0400 - 0x0000_04FF  matmul4x4     (demo_soc only)
 //   0x0001_0000 - 0x0001_FFFF  Main RAM      (64 KiB code+data+stack,
 //                                             preloadable program image)
 //   everything else            unmapped -> read 0, bus_err flagged
@@ -30,6 +32,12 @@ package soc_map_pkg;
     localparam logic [31:0] IRQ_SIZE   = 32'h0000_0010;
     localparam logic [31:0] UART_BASE  = 32'h0000_0230;
     localparam logic [31:0] UART_SIZE  = 32'h0000_0010;
+    // demo_soc-only peripherals (rtl/peripherals/); addr_decode, soc_top and
+    // soc_core_top do not decode them (they stay unmapped there).
+    localparam logic [31:0] SEG_BASE    = 32'h0000_0240;
+    localparam logic [31:0] SEG_SIZE    = 32'h0000_0010;
+    localparam logic [31:0] MATMUL_BASE = 32'h0000_0400;
+    localparam logic [31:0] MATMUL_SIZE = 32'h0000_0100;
     localparam logic [31:0] MEM_BASE   = 32'h0001_0000;
     localparam logic [31:0] MEM_SIZE   = 32'h0001_0000;  // 64 KiB
     localparam int          MEM_WORDS  = 16384;

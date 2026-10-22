@@ -1,15 +1,16 @@
 # Regression entry points (Icarus Verilog, iverilog -g2012 + vvp).
 #   make test   - everything below
 #   test-ppa-check (ALU equivalence + MUL random vectors) also needs yosys.
+#   make demo   - demo SoC (7-seg + UART shell + matmul4x4), full transcript
 SIM_OUT ?= /tmp/riscv_sim
 IV      := iverilog -g2012
 export SIM_OUT
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
-.PHONY: test test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration test-ppa-check
+.PHONY: test test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration test-ppa-check demo test-demo
 
-test: test-unit test-pipeline test-cache test-priv test-mmu test-soc test-integration test-ppa-check
+test: test-unit test-pipeline test-cache test-priv test-mmu test-soc test-demo test-integration test-ppa-check
 	@echo "== make test: all suites passed"
 
 # Pre-existing self-checking unit / single-cycle / legacy SoC benches
@@ -53,6 +54,13 @@ test-soc:
 
 test-integration:
 	bash tb/integration/run.sh
+
+# Demo SoC (rtl/peripherals/, sw/demo/): 7-seg + matmul unit tests + full demo
+demo:
+	bash tb/peripherals/run.sh
+
+test-demo:
+	bash tb/peripherals/run.sh | grep -E "TEST|DEMO TESTS"
 
 # PPA refactor checks: ALU formal equivalence vs 53f6ec9 (yosys SAT) + MUL random vectors.
 test-ppa-check:
